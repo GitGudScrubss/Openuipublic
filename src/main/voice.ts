@@ -1,7 +1,10 @@
 import OpenAI, { toFile } from 'openai'
 import * as https from 'node:https'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { BrowserWindow, ipcMain } from 'electron'
 import { coerceTier, handleChat } from './agent'
+import { getUserTier } from './auth/sessionManager'
 
 function emit(win: BrowserWindow, channel: string, ...args: unknown[]): void {
   if (!win.isDestroyed()) win.webContents.send(channel, ...args)
@@ -11,6 +14,31 @@ function emit(win: BrowserWindow, channel: string, ...args: unknown[]): void {
 // a hostile/forged IPC message can't force a huge allocation or upload.
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024
 const ALLOWED_AUDIO_MIME = /^audio\/(webm|ogg|mp4|mpeg|wav|x-m4a)(;.*)?$/
+
+const execFileAsync = promisify(execFile)
+
+async function transcribeWithLocalWhisper(audioBuffer: Buffer): Promise<string> {
+  const binaryPath = process.env.WHISPER_CPP_PATH
+  if (!binaryPath) {
+    throw new Error(
+      'WHISPER_CPP_PATH is not set. ' +
+        'Point it to your compiled whisper.cpp binary, or upgrade to Pro for cloud transcription.'
+    )
+  }
+  const { writeFile, unlink } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const tmpPath = join(tmpdir(), `openui-audio-${Date.now()}.wav`)
+  await writeFile(tmpPath, audioBuffer)
+  try {
+    const { stdout } = await execFileAsync(binaryPath, ['-m', 'base', '-f', tmpPath, '-nt'], {
+      maxBuffer: 4 * 1024 * 1024
+    })
+    return stdout.trim()
+  } finally {
+    await unlink(tmpPath).catch(() => {})
+  }
+}
 
 export async function transcribeWithWhisper(audioBuffer: Buffer, mimeType: string): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY
@@ -126,9 +154,26 @@ export function registerVoiceIPC(win: BrowserWindow): void {
     const safeTier = coerceTier(tier)
     const audioBuffer = Buffer.from(audio.buffer, audio.byteOffset, audio.byteLength)
 
+    // Use server-side tier for whisper routing — free tier uses local whisper.cpp
+    // (if configured), pro/enterprise use the OpenAI Whisper API.
+    const serverTier = getUserTier()
+
     let transcript: string
     try {
-      transcript = await transcribeWithWhisper(audioBuffer, safeMime)
+      if (serverTier === 'free') {
+        if (!process.env.WHISPER_CPP_PATH) {
+          emit(
+            win,
+            'openui:chat:error',
+            'Voice transcription requires a Pro subscription for cloud accuracy. ' +
+              'Set WHISPER_CPP_PATH to use a local Whisper model instead.'
+          )
+          return
+        }
+        transcript = await transcribeWithLocalWhisper(audioBuffer)
+      } else {
+        transcript = await transcribeWithWhisper(audioBuffer, safeMime)
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       emit(win, 'openui:chat:error', message)
