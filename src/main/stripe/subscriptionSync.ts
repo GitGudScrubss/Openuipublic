@@ -6,33 +6,32 @@
  * Source-of-truth flow:
  *   Stripe webhook → Supabase `app_metadata.tier`  (authoritative)
  *   syncSubscriptionStatus() reads that + cross-checks live Stripe status via an
- *   Edge Function, writes the result into the UNTRUSTED local cache, and tells
- *   the renderer when the tier changes.
+ *   Edge Function, writes the result into the UNTRUSTED local cache
+ *   (`database.subscriptions`), and tells the renderer when the tier changes.
+ *
+ * The signed-in user is owned by the auth layer (sessionManager); we read the
+ * active user id from `settings` so checkout/sync target the right account.
  */
 import { BrowserWindow } from 'electron'
-import { getSupabase, isSupabaseConfigured } from '../supabase/client'
-import { getCachedSubscription, setCachedSubscription } from './subscriptionCache'
+import { getSupabaseClient, isSupabaseConfigured } from '../auth/supabaseClient'
+import { database } from '../database'
+import { ACTIVE_USER_KEY } from '../auth/sessionManager'
 import { getTierForUser, type TierId } from './pricing'
 
 const SYNC_INTERVAL_MS = 5 * 60 * 1000
+const DAY_SEC = 24 * 60 * 60
 
 let mainWindow: BrowserWindow | null = null
 let syncTimer: ReturnType<typeof setInterval> | null = null
 let focusHandlerAttached = false
 
 /**
- * The Supabase id of the currently signed-in user, or null when signed out.
- * The auth feature sets this on login/logout. For local development before auth
- * lands, it can be seeded from OPENUI_DEV_USER_ID.
+ * The Supabase id of the currently signed-in user (or null). Owned by the auth
+ * layer, which records it in `settings` under `auth.active_user_id`.
  */
-let currentUserId: string | null = process.env.OPENUI_DEV_USER_ID?.trim() || null
-
 export function getCurrentUserId(): string | null {
-  return currentUserId
-}
-
-export function setCurrentUserId(userId: string | null): void {
-  currentUserId = userId?.trim() || null
+  const id = database.settings.getSetting(ACTIVE_USER_KEY)
+  return typeof id === 'string' && id ? id : null
 }
 
 /** Register the main window so tier/payment events can be pushed to the UI. */
@@ -63,57 +62,45 @@ function coerceTier(value: unknown): TierId {
  * Returns the resolved current tier.
  */
 export async function syncSubscriptionStatus(userId: string): Promise<TierId> {
-  const cached = getCachedSubscription(userId)
-  const previousTier: TierId = cached?.tier ?? 'free'
+  const previousTier = getTierForUser(userId)
 
   if (!isSupabaseConfigured()) {
     // Nothing to verify against — never trust a stale cache to unlock paid tiers.
-    return getTierForUser(userId)
+    return previousTier
   }
 
   try {
-    const supabase = getSupabase()
+    const supabase = getSupabaseClient()
 
     // 1) Authoritative claim: the tier baked into the user's JWT by the webhook.
     let tier: TierId | null = null
     const { data: userData, error: userErr } = await supabase.auth.getUser()
     if (!userErr) {
-      const metaTier = userData?.user?.app_metadata?.tier
+      const metaTier = (userData?.user?.app_metadata as Record<string, unknown> | undefined)?.tier
       if (metaTier) tier = coerceTier(metaTier)
     }
 
-    // 2) Live cross-check with Stripe (status + period end + customer id). The
-    //    Edge Function holds the Stripe secret key; we only receive the result.
-    let stripeStatus: string | null = cached?.stripeStatus ?? null
-    let stripeCustomerId: string | null = cached?.stripeCustomerId ?? null
-    let currentPeriodEnd: number | null = cached?.currentPeriodEnd ?? null
-
+    // 2) Live cross-check with Stripe (status + period end) via Edge Function.
+    //    The Edge Function holds the Stripe secret key; we only receive results.
+    let stripeStatus = 'active'
+    let currentPeriodEnd: number | null = null
     const { data: subData, error: subErr } = await supabase.functions.invoke('check-subscription', {
       body: { userId }
     })
     if (!subErr && subData && typeof subData === 'object') {
-      const d = subData as {
-        tier?: unknown
-        status?: unknown
-        customerId?: unknown
-        currentPeriodEnd?: unknown
-      }
+      const d = subData as { tier?: unknown; status?: unknown; currentPeriodEnd?: unknown }
       if (d.tier) tier = coerceTier(d.tier)
       if (typeof d.status === 'string') stripeStatus = d.status
-      if (typeof d.customerId === 'string') stripeCustomerId = d.customerId
       if (typeof d.currentPeriodEnd === 'number') currentPeriodEnd = d.currentPeriodEnd
     }
 
     const resolvedTier: TierId = tier ?? 'free'
+    const nowSec = Math.floor(Date.now() / 1000)
+    // A paid tier with no explicit period end stays fresh for a day so
+    // getTierForUser doesn't immediately treat it as expired.
+    const periodEnd = currentPeriodEnd ?? (resolvedTier === 'free' ? nowSec : nowSec + DAY_SEC)
 
-    setCachedSubscription({
-      userId,
-      tier: resolvedTier,
-      stripeStatus,
-      stripeCustomerId,
-      currentPeriodEnd,
-      updatedAt: Date.now()
-    })
+    database.subscriptions.cacheSubscription(userId, resolvedTier, stripeStatus, periodEnd)
 
     if (resolvedTier !== previousTier) {
       emitToRenderer('openui:tier-changed', resolvedTier)
@@ -135,9 +122,8 @@ export async function syncSubscriptionStatus(userId: string): Promise<TierId> {
  *   • whenever the main window regains focus,
  *   • plus an immediate sync right now.
  * Idempotent — calling it more than once won't stack timers/listeners. The loop
- * idles harmlessly while there is no signed-in user.
- *
- * In a full auth flow, call this right after a successful login.
+ * idles harmlessly while there is no signed-in user. The timer is unref'd so it
+ * never by itself keeps the app alive.
  */
 export function startSubscriptionSyncLoop(): void {
   const tick = (): void => {
@@ -145,7 +131,10 @@ export function startSubscriptionSyncLoop(): void {
     if (userId) void syncSubscriptionStatus(userId)
   }
 
-  if (!syncTimer) syncTimer = setInterval(tick, SYNC_INTERVAL_MS)
+  if (!syncTimer) {
+    syncTimer = setInterval(tick, SYNC_INTERVAL_MS)
+    if (typeof syncTimer.unref === 'function') syncTimer.unref()
+  }
 
   if (mainWindow && !mainWindow.isDestroyed() && !focusHandlerAttached) {
     mainWindow.on('focus', tick)

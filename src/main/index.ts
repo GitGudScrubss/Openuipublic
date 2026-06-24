@@ -2,21 +2,15 @@ import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, session, 
 import { join } from 'path'
 import { registerAgentIPC } from './agent'
 import { registerVoiceIPC } from './voice'
+import { registerInterviewerIPC } from './interviewer'
+import { startScheduler } from './scheduler'
 import { openSettingsPane, type PermissionTarget } from './permissions'
 import { registerStripeIPC, isPaymentFlowWebContents } from './stripe/checkout'
-import {
-  handlePaymentSuccess,
-  syncSubscriptionStatus,
-  getCurrentUserId,
-  emitToRenderer
-} from './stripe/subscriptionSync'
-
-/**
- * Custom URL scheme used for Stripe redirect targets (payment success/cancel and
- * billing-portal return). Registering it lets the OS hand `openui://…` links back
- * to this app even when Stripe redirects outside the in-app payment window.
- */
-const DEEP_LINK_SCHEME = 'openui'
+import { closeBrowser } from './tools'
+import { initDatabase } from './database'
+import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
+import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
+import { logout, getCurrentUser, getUserTier, startTokenRefreshLoop, stopTokenRefreshLoop } from './auth/sessionManager'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -90,11 +84,12 @@ function applySecurityHardening(): void {
     })
 
     // Disallow navigating the main frame anywhere except the app's own origin
-    // (the Vite dev URL in development, file:// when packaged). The Stripe
-    // payment window is exempt: it must reach Stripe/bank domains, and its own
-    // monitor (checkout.ts) intercepts the success/cancel/return redirects.
+    // (the Vite dev URL in development, file:// when packaged). Two windows are
+    // exempt and roam external origins: the OAuth window (Supabase/Google) and
+    // the Stripe payment window (Stripe/bank). Each has its own handler that
+    // captures the openui:// callback / success+cancel redirects.
     contents.on('will-navigate', (event, url) => {
-      if (isPaymentFlowWebContents(contents)) return
+      if (isAuthWebContents(contents) || isPaymentFlowWebContents(contents)) return
       const devUrl = process.env['ELECTRON_RENDERER_URL']
       const allowed = (isDev && devUrl && url.startsWith(devUrl)) || url.startsWith('file://')
       if (!allowed) event.preventDefault()
@@ -157,8 +152,10 @@ function createWindow(): void {
     }
   })
 
-  // Float above normal windows like a real menu-bar panel and stay available
-  // even on other Spaces / full-screen apps (macOS).
+  // Float above normal windows like a real overlay panel.
+  // On Windows the 'screen-saver' level is clamped to 'floating' by Electron,
+  // which still places the window above normal app windows — the desired effect.
+  // setVisibleOnAllWorkspaces is a no-op on Windows (no virtual-desktop API).
   win.setAlwaysOnTop(true, 'screen-saver')
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
 
@@ -169,9 +166,10 @@ function createWindow(): void {
   }
 
   // Dismiss when focus is lost — but only when packaged, so DevTools stay
-  // usable during development.
+  // usable during development. Never hide while the OAuth window is open: it is
+  // a child of this overlay, so hiding the parent would hide the sign-in window.
   win.on('blur', () => {
-    if (app.isPackaged && win && !win.webContents.isDevToolsOpened()) hideWindow()
+    if (app.isPackaged && win && !win.webContents.isDevToolsOpened() && !isAuthWindowOpen()) hideWindow()
   })
 
   win.on('closed', () => {
@@ -224,84 +222,13 @@ function createTray(): void {
   tray.on('right-click', () => tray?.popUpContextMenu(contextMenu))
 }
 
-// ── deep links (openui://) + single-instance ──────────────────────────────────
-
-// Links that arrive during cold start (before the window exists) are stashed
-// here and flushed once the app is ready.
-let pendingDeepLink: string | null = null
-
-/**
- * Route an `openui://…` deep link to the right handler. Used both by the OS
- * (macOS `open-url`, Windows/Linux `second-instance`) and as a backup to the
- * in-window monitor in checkout.ts when Stripe redirects outside the app window.
- */
-function handleDeepLink(url: string): void {
-  if (!app.isReady() || !win) {
-    pendingDeepLink = url
-    return
-  }
-
-  let action: string
-  try {
-    const parsed = new URL(url)
-    if (parsed.protocol !== `${DEEP_LINK_SCHEME}:`) return
-    // openui://payment-success → host is "payment-success"; tolerate a path form.
-    action = parsed.host || parsed.pathname.replace(/^\/+/, '')
-  } catch {
-    return // not a parseable URL
-  }
-
-  switch (action) {
-    case 'payment-success': {
-      const userId = getCurrentUserId()
-      if (userId) void handlePaymentSuccess(userId)
-      break
-    }
-    case 'payment-cancelled':
-      emitToRenderer('openui:payment-cancelled')
-      break
-    case 'portal-closed': {
-      const userId = getCurrentUserId()
-      if (userId) void syncSubscriptionStatus(userId)
-      break
-    }
-    default:
-      break // unknown deep link — ignore
-  }
-
-  showWindow()
-}
-
-// Register the custom scheme so the OS routes openui:// links to this app.
-// (When packaged on macOS this is also declared via CFBundleURLTypes.)
-if (!app.isDefaultProtocolClient(DEEP_LINK_SCHEME)) {
-  app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME)
-}
-
-// Only one OpenUI instance may run (it's a single tray app). A second launch —
-// e.g. the OS opening an openui:// link — forwards the link to the primary and
-// exits. The primary handles 'second-instance' (Windows/Linux) and 'open-url'
-// (macOS).
-const gotInstanceLock = app.requestSingleInstanceLock()
-if (!gotInstanceLock) {
-  app.quit()
-}
-
-app.on('second-instance', (_event, argv) => {
-  const url = argv.find((arg) => arg.startsWith(`${DEEP_LINK_SCHEME}://`))
-  if (url) handleDeepLink(url)
-  else showWindow()
-})
-
-// macOS delivers deep links here; this can fire before the app is ready.
-app.on('open-url', (event, url) => {
-  event.preventDefault()
-  handleDeepLink(url)
-})
+// Claim the single-instance lock and register the openui:// protocol BEFORE the
+// app is ready, so a second launch (e.g. the OS delivering a deep link on
+// Windows) exits immediately and hands its argv to the primary instance.
+registerDeepLinkProtocol()
 
 app.whenReady().then(() => {
-  // A non-primary instance has already been told to quit — don't initialise it.
-  if (!gotInstanceLock) return
+  initDatabase()
 
   // True menu-bar app: no Dock icon on macOS.
   if (process.platform === 'darwin') app.dock?.hide()
@@ -311,14 +238,19 @@ app.whenReady().then(() => {
   createWindow()
   createTray()
 
+  // Route deep links to the main window and keep the access token fresh.
+  setupDeepLinkHandlers(win)
+  startTokenRefreshLoop(win)
+
   ipcMain.on('openui:hide', () => hideWindow())
   ipcMain.on('openui:quit', () => app.quit())
 
-  // Open the macOS System Settings pane for the requested permission so the
-  // user can grant it without manually navigating the Settings tree. The
-  // permission value is validated against a fixed allowlist before it is used
-  // to look up a settings deep-link URL (defence against a malformed/forged IPC
-  // message reaching shell.openExternal).
+  // Open the OS settings pane for the requested permission so the user can
+  // grant it without navigating the Settings UI manually.
+  // macOS → System Settings deep-link; Windows → ms-settings: URI.
+  // The permission value is validated against a fixed allowlist before it is
+  // used to look up the URL (defence against a malformed/forged IPC message
+  // reaching shell.openExternal).
   ipcMain.on('openui:permission:open-settings', (_event, permission: unknown) => {
     if (!PERMISSION_TARGETS.includes(permission as PermissionTarget)) {
       console.error('[openui] Ignored open-settings for invalid permission:', permission)
@@ -329,21 +261,25 @@ app.whenReady().then(() => {
     )
   })
 
+  // ── Authentication IPC ──────────────────────────────────────────────────────
+  // Open the Google OAuth window. Returns whether it opened (false when Supabase
+  // is unconfigured) so the renderer can surface a setup hint.
+  ipcMain.handle('openui:login', () => Boolean(openAuthWindow(win)))
+  // Sign out, clearing local tokens and revoking the Supabase session.
+  ipcMain.handle('openui:logout', () => logout(win))
+  // Current user profile (id, email, display_name, avatar_url, tier) or null.
+  ipcMain.handle('openui:get-user', () => getCurrentUser())
+  // Cached subscription tier ('free' when unknown/expired).
+  ipcMain.handle('openui:get-tier', () => getUserTier())
+
   if (win) {
     registerAgentIPC(win)
     registerVoiceIPC(win)
-    // Wire the Stripe/subscription IPC and start the periodic sync loop. In a
-    // full auth flow you'd call setCurrentUserId() + startSubscriptionSyncLoop()
-    // right after login; the loop here idles until a user is signed in.
+    registerInterviewerIPC(win)
+    // Phase 8: activity monitor + Autonomous Coding Mode IPC.
+    startScheduler(win)
+    // Stripe/subscription IPC + periodic sync loop (idles until a user signs in).
     registerStripeIPC(win)
-  }
-
-  // Flush a deep link that arrived during cold start (e.g. the app was launched
-  // by clicking an openui:// link before the window existed).
-  if (pendingDeepLink) {
-    const url = pendingDeepLink
-    pendingDeepLink = null
-    handleDeepLink(url)
   }
 
   app.on('activate', () => {
@@ -354,4 +290,14 @@ app.whenReady().then(() => {
 // Keep the app alive in the tray when the popup window is hidden/closed.
 app.on('window-all-closed', () => {
   // Intentionally do not quit — the tray icon keeps OpenUI running.
+})
+
+// Gracefully close the Playwright browser (if open) before the process exits.
+app.on('before-quit', () => {
+  closeBrowser().catch(() => {})
+})
+
+// Release auth resources on shutdown: stop the proactive token-refresh timer.
+app.on('will-quit', () => {
+  stopTokenRefreshLoop()
 })

@@ -17,8 +17,8 @@
  *     the success/cancel/return URLs.
  */
 import { BrowserWindow, ipcMain, type WebContents } from 'electron'
-import { getSupabase, isSupabaseConfigured } from '../supabase/client'
-import { getCachedSubscription } from './subscriptionCache'
+import { getSupabaseClient, isSupabaseConfigured } from '../auth/supabaseClient'
+import { database } from '../database'
 import { TIERS } from './pricing'
 import {
   emitToRenderer,
@@ -170,8 +170,10 @@ export async function openCheckoutWindow(userId: string, priceId: string): Promi
   if (!priceId) throw new Error('openCheckoutWindow: missing priceId.')
   if (!isSupabaseConfigured()) throw new Error('Supabase is not configured; cannot start checkout.')
 
-  const supabase = getSupabase()
-  const email = (await supabase.auth.getUser()).data.user?.email
+  const supabase = getSupabaseClient()
+  // Read the email from the local user record (populated at sign-in) rather than
+  // a network round-trip; the Edge Function uses it to find/create the customer.
+  const email = database.users.getUserById(userId)?.email ?? undefined
 
   const { data, error } = await supabase.functions.invoke('create-checkout', {
     body: { userId, priceId, email }
@@ -198,11 +200,12 @@ export async function openCustomerPortal(userId: string): Promise<void> {
   if (!userId) throw new Error('openCustomerPortal: not signed in (missing userId).')
   if (!isSupabaseConfigured()) throw new Error('Supabase is not configured; cannot open billing portal.')
 
-  const supabase = getSupabase()
-  const customerIdHint = getCachedSubscription(userId)?.stripeCustomerId ?? undefined
+  const supabase = getSupabaseClient()
 
+  // The Edge Function resolves the Stripe customer from the user id (via the
+  // app_metadata.stripeCustomerId the webhook stored), so we just pass userId.
   const { data, error } = await supabase.functions.invoke('customer-portal', {
-    body: { userId, customerId: customerIdHint }
+    body: { userId }
   })
   if (error) throw new Error(`customer-portal failed: ${error.message}`)
 

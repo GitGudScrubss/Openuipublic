@@ -8,7 +8,7 @@
  * here (or anywhere in the Electron app); it lives only in Supabase Edge Function
  * secrets. See `.env.example` and `supabase/functions/README.md`.
  */
-import { getCachedSubscription } from './subscriptionCache'
+import { database } from '../database'
 
 export const TIERS = {
   free: {
@@ -80,20 +80,30 @@ export function isModelAllowedForTier(model: string, tier: TierId): boolean {
 /**
  * How long a cached tier may be trusted once Supabase becomes unreachable.
  * Beyond this we refuse to keep "unlocking" paid features and fall back to free.
+ * Seconds, to match the `subscription_cache` schema (epoch SECONDS).
  */
-export const MAX_CACHE_STALENESS_MS = 24 * 60 * 60 * 1000
+export const MAX_CACHE_STALENESS_SEC = 24 * 60 * 60
+
+function coerceTier(value: string | null | undefined): TierId {
+  return value === 'pro' || value === 'enterprise' ? value : 'free'
+}
 
 /**
- * Best-effort, synchronous read of a user's tier from the local cache. Returns
- * 'free' when there is no cached row OR when the cached row is older than
- * `MAX_CACHE_STALENESS_MS` — i.e. we never trust a stale cache to unlock paid
+ * Best-effort, synchronous read of a user's tier from the local subscription
+ * cache (the shared `database.subscriptions` repo). Returns 'free' when there is
+ * no cached row, when the paid period has ended, OR when the row is older than
+ * `MAX_CACHE_STALENESS_SEC` — i.e. we never trust a stale cache to unlock paid
  * features. For an authoritative value, call `syncSubscriptionStatus()` instead.
  */
 export function getTierForUser(userId: string): TierId {
-  const rec = getCachedSubscription(userId)
-  if (!rec) return 'free'
-  if (Date.now() - rec.updatedAt > MAX_CACHE_STALENESS_MS) return 'free'
-  return rec.tier
+  const sub = database.subscriptions.getCachedSubscription(userId)
+  if (!sub?.tier) return 'free'
+  const nowSec = Math.floor(Date.now() / 1000)
+  // Paid period has ended → downgrade (matches sessionManager.getUserTier).
+  if (sub.current_period_end != null && sub.current_period_end <= nowSec) return 'free'
+  // Stale cache (>24h since last sync) → don't trust it to unlock paid features.
+  if (nowSec - sub.updated_at > MAX_CACHE_STALENESS_SEC) return 'free'
+  return coerceTier(sub.tier)
 }
 
 /**
