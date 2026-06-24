@@ -3,6 +3,7 @@ import { join } from 'path'
 import { registerAgentIPC } from './agent'
 import { registerVoiceIPC } from './voice'
 import { openSettingsPane, type PermissionTarget } from './permissions'
+import { initDatabase } from './database'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -205,6 +206,8 @@ function createTray(): void {
 }
 
 app.whenReady().then(() => {
+  initDatabase()
+
   // True menu-bar app: no Dock icon on macOS.
   if (process.platform === 'darwin') app.dock?.hide()
 
