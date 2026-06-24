@@ -25,6 +25,17 @@
       "resources/**/*",
       "package.json"
     ],
+    "protocols": [
+      {
+        "name": "OpenUI Auth",
+        "schemes": [
+          "openui"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
@@ -38,6 +49,9 @@
       ],
       "icon": "resources/icon.icns"
     },
+    "win": {
+      "target": "nsis"
+    },
     "dmg": {
       "title": "${productName} ${version}"
     }
@@ -45,6 +59,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
     "@nut-tree-fork/nut-js": "^4.2.0",
+    "@supabase/supabase-js": "^2.108.2",
     "@types/better-sqlite3": "^7.6.13",
     "better-sqlite3": "^12.11.1",
     "gsap": "^3.12.5",

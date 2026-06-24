@@ -4,6 +4,9 @@ import { registerAgentIPC } from './agent'
 import { registerVoiceIPC } from './voice'
 import { openSettingsPane, type PermissionTarget } from './permissions'
 import { initDatabase } from './database'
+import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
+import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
+import { logout, getCurrentUser, getUserTier, startTokenRefreshLoop, stopTokenRefreshLoop } from './auth/sessionManager'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -74,8 +77,11 @@ function applySecurityHardening(): void {
     })
 
     // Disallow navigating the main frame anywhere except the app's own origin
-    // (the Vite dev URL in development, file:// when packaged).
+    // (the Vite dev URL in development, file:// when packaged). The OAuth window
+    // is exempt — it must roam across the Supabase/Google origins the sign-in
+    // flow needs; its own handler captures the openui:// callback.
     contents.on('will-navigate', (event, url) => {
+      if (isAuthWebContents(contents)) return
       const devUrl = process.env['ELECTRON_RENDERER_URL']
       const allowed = (isDev && devUrl && url.startsWith(devUrl)) || url.startsWith('file://')
       if (!allowed) event.preventDefault()
@@ -150,9 +156,10 @@ function createWindow(): void {
   }
 
   // Dismiss when focus is lost — but only when packaged, so DevTools stay
-  // usable during development.
+  // usable during development. Never hide while the OAuth window is open: it is
+  // a child of this overlay, so hiding the parent would hide the sign-in window.
   win.on('blur', () => {
-    if (app.isPackaged && win && !win.webContents.isDevToolsOpened()) hideWindow()
+    if (app.isPackaged && win && !win.webContents.isDevToolsOpened() && !isAuthWindowOpen()) hideWindow()
   })
 
   win.on('closed', () => {
@@ -205,6 +212,11 @@ function createTray(): void {
   tray.on('right-click', () => tray?.popUpContextMenu(contextMenu))
 }
 
+// Claim the single-instance lock and register the openui:// protocol BEFORE the
+// app is ready, so a second launch (e.g. the OS delivering a deep link on
+// Windows) exits immediately and hands its argv to the primary instance.
+registerDeepLinkProtocol()
+
 app.whenReady().then(() => {
   initDatabase()
 
@@ -215,6 +227,10 @@ app.whenReady().then(() => {
 
   createWindow()
   createTray()
+
+  // Route deep links to the main window and keep the access token fresh.
+  setupDeepLinkHandlers(win)
+  startTokenRefreshLoop(win)
 
   ipcMain.on('openui:hide', () => hideWindow())
   ipcMain.on('openui:quit', () => app.quit())
@@ -234,6 +250,17 @@ app.whenReady().then(() => {
     )
   })
 
+  // ── Authentication IPC ──────────────────────────────────────────────────────
+  // Open the Google OAuth window. Returns whether it opened (false when Supabase
+  // is unconfigured) so the renderer can surface a setup hint.
+  ipcMain.handle('openui:login', () => Boolean(openAuthWindow(win)))
+  // Sign out, clearing local tokens and revoking the Supabase session.
+  ipcMain.handle('openui:logout', () => logout(win))
+  // Current user profile (id, email, display_name, avatar_url, tier) or null.
+  ipcMain.handle('openui:get-user', () => getCurrentUser())
+  // Cached subscription tier ('free' when unknown/expired).
+  ipcMain.handle('openui:get-tier', () => getUserTier())
+
   if (win) {
     registerAgentIPC(win)
     registerVoiceIPC(win)
@@ -247,4 +274,9 @@ app.whenReady().then(() => {
 // Keep the app alive in the tray when the popup window is hidden/closed.
 app.on('window-all-closed', () => {
   // Intentionally do not quit — the tray icon keeps OpenUI running.
+})
+
+// Release auth resources on shutdown: stop the proactive token-refresh timer.
+app.on('will-quit', () => {
+  stopTokenRefreshLoop()
 })
