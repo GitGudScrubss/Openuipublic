@@ -25,6 +25,17 @@
       "resources/**/*",
       "package.json"
     ],
+    "protocols": [
+      {
+        "name": "OpenUI Auth",
+        "schemes": [
+          "openui"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
     "mac": {
       "category": "public.app-category.productivity",
       "target": [
@@ -38,20 +49,25 @@
       ],
       "icon": "resources/icon.icns"
     },
+    "win": {
+      "target": "nsis"
+    },
     "dmg": {
       "title": "${productName} ${version}"
     }
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
-    "tesseract.js": "^5.1.0",
     "@nut-tree-fork/nut-js": "^4.2.0",
+    "@supabase/supabase-js": "^2.108.2",
+    "better-sqlite3": "^11.8.0",
     "gsap": "^3.12.5",
     "node-osascript": "^2.1.0",
     "ollama": "^0.5.0",
     "openai": "^4.0.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tesseract.js": "^5.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",

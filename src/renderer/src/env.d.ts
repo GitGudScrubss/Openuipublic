@@ -22,6 +22,15 @@ export interface TaskUpdatePayload {
   detail?: string
 }
 
+/** Signed-in user profile, as returned/pushed by the main auth layer. */
+export interface AuthUser {
+  id: string
+  email: string | null
+  display_name: string | null
+  avatar_url: string | null
+  tier: string
+}
+
 export interface OpenUIApi {
   hide: () => void
   quit: () => void
@@ -39,6 +48,14 @@ export interface OpenUIApi {
   onPermissionDenied: (cb: (permission: PermissionTarget) => void) => () => void
   // Ask main to open the System Settings pane for the given permission.
   openSettings: (permission: PermissionTarget) => void
+  // Authentication (Google OAuth via Supabase).
+  login: () => Promise<boolean>
+  logout: () => Promise<void>
+  getUser: () => Promise<AuthUser | null>
+  getTier: () => Promise<string>
+  onAuthSuccess: (cb: (user: AuthUser) => void) => () => void
+  onAuthError: (cb: (error: { message: string }) => void) => () => void
+  onAuthLogout: (cb: () => void) => () => void
 }
 
 declare global {
