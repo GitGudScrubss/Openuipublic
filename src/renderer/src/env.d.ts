@@ -39,6 +39,13 @@ export interface OpenUIApi {
   onPermissionDenied: (cb: (permission: PermissionTarget) => void) => () => void
   // Ask main to open the System Settings pane for the given permission.
   openSettings: (permission: PermissionTarget) => void
+  // Subscriptions / Stripe.
+  checkout: (priceId: string) => Promise<void>
+  openPortal: () => Promise<void>
+  syncSubscription: () => Promise<'free' | 'pro' | 'enterprise'>
+  onTierChanged: (cb: (tier: 'free' | 'pro' | 'enterprise') => void) => () => void
+  onPaymentSuccess: (cb: () => void) => () => void
+  onPaymentCancelled: (cb: () => void) => () => void
 }
 
 declare global {

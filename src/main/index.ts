@@ -3,6 +3,20 @@ import { join } from 'path'
 import { registerAgentIPC } from './agent'
 import { registerVoiceIPC } from './voice'
 import { openSettingsPane, type PermissionTarget } from './permissions'
+import { registerStripeIPC, isPaymentFlowWebContents } from './stripe/checkout'
+import {
+  handlePaymentSuccess,
+  syncSubscriptionStatus,
+  getCurrentUserId,
+  emitToRenderer
+} from './stripe/subscriptionSync'
+
+/**
+ * Custom URL scheme used for Stripe redirect targets (payment success/cancel and
+ * billing-portal return). Registering it lets the OS hand `openui://…` links back
+ * to this app even when Stripe redirects outside the in-app payment window.
+ */
+const DEEP_LINK_SCHEME = 'openui'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -66,15 +80,21 @@ function applySecurityHardening(): void {
 
   app.on('web-contents-created', (_event, contents) => {
     // Block all attempts to open new windows; route genuine external links to
-    // the OS browser instead of a privileged Electron window.
+    // the OS browser instead of a privileged Electron window. Payment windows
+    // (Stripe checkout/portal) deny popups too, but WITHOUT leaking the URL to
+    // the external browser mid-flow.
     contents.setWindowOpenHandler(({ url }) => {
+      if (isPaymentFlowWebContents(contents)) return { action: 'deny' }
       if (url.startsWith('https://')) void shell.openExternal(url)
       return { action: 'deny' }
     })
 
     // Disallow navigating the main frame anywhere except the app's own origin
-    // (the Vite dev URL in development, file:// when packaged).
+    // (the Vite dev URL in development, file:// when packaged). The Stripe
+    // payment window is exempt: it must reach Stripe/bank domains, and its own
+    // monitor (checkout.ts) intercepts the success/cancel/return redirects.
     contents.on('will-navigate', (event, url) => {
+      if (isPaymentFlowWebContents(contents)) return
       const devUrl = process.env['ELECTRON_RENDERER_URL']
       const allowed = (isDev && devUrl && url.startsWith(devUrl)) || url.startsWith('file://')
       if (!allowed) event.preventDefault()
@@ -204,7 +224,85 @@ function createTray(): void {
   tray.on('right-click', () => tray?.popUpContextMenu(contextMenu))
 }
 
+// ── deep links (openui://) + single-instance ──────────────────────────────────
+
+// Links that arrive during cold start (before the window exists) are stashed
+// here and flushed once the app is ready.
+let pendingDeepLink: string | null = null
+
+/**
+ * Route an `openui://…` deep link to the right handler. Used both by the OS
+ * (macOS `open-url`, Windows/Linux `second-instance`) and as a backup to the
+ * in-window monitor in checkout.ts when Stripe redirects outside the app window.
+ */
+function handleDeepLink(url: string): void {
+  if (!app.isReady() || !win) {
+    pendingDeepLink = url
+    return
+  }
+
+  let action: string
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== `${DEEP_LINK_SCHEME}:`) return
+    // openui://payment-success → host is "payment-success"; tolerate a path form.
+    action = parsed.host || parsed.pathname.replace(/^\/+/, '')
+  } catch {
+    return // not a parseable URL
+  }
+
+  switch (action) {
+    case 'payment-success': {
+      const userId = getCurrentUserId()
+      if (userId) void handlePaymentSuccess(userId)
+      break
+    }
+    case 'payment-cancelled':
+      emitToRenderer('openui:payment-cancelled')
+      break
+    case 'portal-closed': {
+      const userId = getCurrentUserId()
+      if (userId) void syncSubscriptionStatus(userId)
+      break
+    }
+    default:
+      break // unknown deep link — ignore
+  }
+
+  showWindow()
+}
+
+// Register the custom scheme so the OS routes openui:// links to this app.
+// (When packaged on macOS this is also declared via CFBundleURLTypes.)
+if (!app.isDefaultProtocolClient(DEEP_LINK_SCHEME)) {
+  app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME)
+}
+
+// Only one OpenUI instance may run (it's a single tray app). A second launch —
+// e.g. the OS opening an openui:// link — forwards the link to the primary and
+// exits. The primary handles 'second-instance' (Windows/Linux) and 'open-url'
+// (macOS).
+const gotInstanceLock = app.requestSingleInstanceLock()
+if (!gotInstanceLock) {
+  app.quit()
+}
+
+app.on('second-instance', (_event, argv) => {
+  const url = argv.find((arg) => arg.startsWith(`${DEEP_LINK_SCHEME}://`))
+  if (url) handleDeepLink(url)
+  else showWindow()
+})
+
+// macOS delivers deep links here; this can fire before the app is ready.
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  handleDeepLink(url)
+})
+
 app.whenReady().then(() => {
+  // A non-primary instance has already been told to quit — don't initialise it.
+  if (!gotInstanceLock) return
+
   // True menu-bar app: no Dock icon on macOS.
   if (process.platform === 'darwin') app.dock?.hide()
 
@@ -234,6 +332,18 @@ app.whenReady().then(() => {
   if (win) {
     registerAgentIPC(win)
     registerVoiceIPC(win)
+    // Wire the Stripe/subscription IPC and start the periodic sync loop. In a
+    // full auth flow you'd call setCurrentUserId() + startSubscriptionSyncLoop()
+    // right after login; the loop here idles until a user is signed in.
+    registerStripeIPC(win)
+  }
+
+  // Flush a deep link that arrived during cold start (e.g. the app was launched
+  // by clicking an openui:// link before the window existed).
+  if (pendingDeepLink) {
+    const url = pendingDeepLink
+    pendingDeepLink = null
+    handleDeepLink(url)
   }
 
   app.on('activate', () => {

@@ -44,8 +44,10 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
+    "@supabase/supabase-js": "^2.108.2",
     "tesseract.js": "^5.1.0",
     "@nut-tree-fork/nut-js": "^4.2.0",
+    "better-sqlite3": "^12.11.1",
     "gsap": "^3.12.5",
     "node-osascript": "^2.1.0",
     "ollama": "^0.5.0",
@@ -54,6 +56,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

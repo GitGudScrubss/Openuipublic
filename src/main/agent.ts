@@ -3,6 +3,8 @@ import OpenAI from 'openai'
 import { Ollama } from 'ollama'
 import { BrowserWindow, ipcMain } from 'electron'
 import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolResult, type Tier } from './tools'
+import { clampTierToEntitlement } from './stripe/pricing'
+import { getCurrentUserId } from './stripe/subscriptionSync'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -177,6 +179,12 @@ function callModel(win: BrowserWindow, tier: Tier, messages: Message[]): Promise
  * status is pushed to the renderer as each tool moves working → done/error.
  */
 export async function handleChat(win: BrowserWindow, userMessage: string, tier: Tier): Promise<void> {
+  // SECURITY: the requested tier arrives from the untrusted renderer. Clamp it to
+  // the signed-in user's verified entitlement so a compromised renderer can never
+  // route to paid models the user hasn't paid for. (No-op when no user is signed
+  // in, e.g. local dev — see clampTierToEntitlement.)
+  const effectiveTier: Tier = clampTierToEntitlement(tier, getCurrentUserId())
+
   const turnStart = history.length // for clean rollback on failure
   history.push({ role: 'user', content: userMessage })
   emit(win, 'openui:task:reset')
@@ -185,7 +193,7 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
     let finalText = ''
 
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-      const responseText = await callModel(win, tier, history)
+      const responseText = await callModel(win, effectiveTier, history)
       history.push({ role: 'assistant', content: responseText })
 
       const toolCall = parseToolCall(responseText)
@@ -206,7 +214,7 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
       } satisfies TaskUpdate)
 
       // Execute in Node and report the outcome to the task list.
-      const result = await executeTool(toolCall.tool, toolCall.args, { tier })
+      const result = await executeTool(toolCall.tool, toolCall.args, { tier: effectiveTier })
 
       // If a tool detected a missing OS permission, notify the renderer so it
       // can show a modal guiding the user to System Settings.
