@@ -6,11 +6,15 @@ import { registerInterviewerIPC } from './interviewer'
 import { startScheduler } from './scheduler'
 import { openSettingsPane, type PermissionTarget } from './permissions'
 import { registerStripeIPC, isPaymentFlowWebContents } from './stripe/checkout'
+import { registerWaitlistIPC } from './waitlist'
 import { closeBrowser } from './tools'
 import { initDatabase } from './database'
 import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
 import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
 import { logout, getCurrentUser, getUserTier, startTokenRefreshLoop, stopTokenRefreshLoop } from './auth/sessionManager'
+import { initTelemetry, shutdownTelemetry, setTelemetryOptOut, isTelemetryActive, trackEvent } from './telemetry/posthog'
+import { initUpdater, checkForUpdates, downloadUpdate, installUpdateAndRestart, openReleasesPage } from './updater/updater'
+import { Events } from './telemetry/events'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -227,13 +231,16 @@ function createTray(): void {
 // Windows) exits immediately and hands its argv to the primary instance.
 registerDeepLinkProtocol()
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   initDatabase()
+  await initTelemetry()
 
   // True menu-bar app: no Dock icon on macOS.
   if (process.platform === 'darwin') app.dock?.hide()
 
   applySecurityHardening()
+  initTelemetry()
+  trackEvent(Events.APP_STARTED, { platform: process.platform, version: app.getVersion() })
 
   createWindow()
   createTray()
@@ -272,6 +279,28 @@ app.whenReady().then(() => {
   // Cached subscription tier ('free' when unknown/expired).
   ipcMain.handle('openui:get-tier', () => getUserTier())
 
+  // ── Telemetry IPC ────────────────────────────────────────────────────────────
+  ipcMain.handle('openui:set-telemetry-opt-out', (_event, optOut: unknown) => {
+    setTelemetryOptOut(optOut === true)
+  })
+  ipcMain.handle('openui:get-telemetry-status', () => isTelemetryActive())
+
+  // Pro-tier waitlist: post an email to the Mailchimp-proxy Edge Function.
+  registerWaitlistIPC()
+
+  // ── Auto-update IPC (electron-updater) ──────────────────────────────────────
+  // All of these are no-ops in development (autoUpdater only runs packaged) —
+  // see ./updater/updater. The renderer surfaces them via the UpdateBanner.
+  ipcMain.handle('openui:get-app-version', () => app.getVersion())
+  ipcMain.handle('openui:check-for-updates', async () => {
+    await checkForUpdates()
+    return { currentVersion: app.getVersion() }
+  })
+  ipcMain.handle('openui:download-update', () => downloadUpdate())
+  ipcMain.handle('openui:install-update-restart', () => installUpdateAndRestart())
+  // macOS (unsigned) fallback: open the GitHub Releases page in the browser.
+  ipcMain.handle('openui:open-releases-page', () => openReleasesPage())
+
   if (win) {
     registerAgentIPC(win)
     registerConversationIPC(win)
@@ -281,6 +310,9 @@ app.whenReady().then(() => {
     startScheduler(win)
     // Stripe/subscription IPC + periodic sync loop (idles until a user signs in).
     registerStripeIPC(win)
+    // Auto-update via electron-updater + GitHub Releases. Schedules its own
+    // checks (30s after launch, every 4h, and on focus) and is inert in dev.
+    initUpdater(win)
   }
 
   app.on('activate', () => {
@@ -288,14 +320,20 @@ app.whenReady().then(() => {
   })
 })
 
+app.on('before-quit', () => {
+  trackEvent(Events.APP_CLOSED)
+  shutdownTelemetry()
+})
+
 // Keep the app alive in the tray when the popup window is hidden/closed.
 app.on('window-all-closed', () => {
   // Intentionally do not quit — the tray icon keeps OpenUI running.
 })
 
-// Gracefully close the Playwright browser (if open) before the process exits.
+// Gracefully close the Playwright browser (if open) and flush PostHog before the process exits.
 app.on('before-quit', () => {
   closeBrowser().catch(() => {})
+  shutdownTelemetry()
 })
 
 // Release auth resources on shutdown: stop the proactive token-refresh timer.

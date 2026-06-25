@@ -17,6 +17,7 @@ are intentionally **excluded** from the Electron TypeScript build
 | `customer-portal`    | App (checkout.ts)    | Return a Stripe Billing Portal URL (manage/cancel/invoices).       |
 | `check-subscription` | App (subscriptionSync) | Return live `{ tier, status, currentPeriodEnd, customerId }`.    |
 | `stripe-webhook`     | **Stripe**           | On subscription events, write `app_metadata.tier` (authoritative). |
+| `waitlist`           | Website + App        | Proxy a waitlist email to Mailchimp (keeps the API key server-side). |
 
 ### `chat-proxy` request contract
 
@@ -52,6 +53,12 @@ supabase secrets set \
 # ANTHROPIC_API_KEY / OPENAI_API_KEY power chat-proxy — these are OUR cloud keys,
 # held only here and never shipped in the app.
 # SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided to functions automatically.
+
+# Waitlist (Mailchimp) — required by the `waitlist` function:
+supabase secrets set \
+  MAILCHIMP_API_KEY=xxxxxxxx-us1 \
+  MAILCHIMP_SERVER_PREFIX=us1 \
+  MAILCHIMP_LIST_ID=xxxxxxxxxx
 ```
 
 ## Deploy

@@ -27,6 +27,8 @@ import Anthropic from '@anthropic-ai/sdk'
 import { checkAccessibility, type PermissionTarget } from './permissions'
 import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
+import { trackEvent } from './telemetry/posthog'
+import { Events } from './telemetry/events'
 
 // execFile (no shell) is used so arguments are passed as an argv array —
 // there is no shell to interpret quotes, pipes, $(...) or `;`.
@@ -36,6 +38,15 @@ const execFileAsync = promisify(execFile)
 // rather than calling process.platform on every invocation.
 const IS_MAC = process.platform === 'darwin'
 const IS_WIN = process.platform === 'win32'
+
+function classifyToolError(error: string): string {
+  if (error.includes('Unknown tool')) return 'unknown_tool'
+  if (error.includes('Invalid arguments')) return 'invalid_args'
+  if (error.includes('only available on macOS')) return 'platform_error'
+  if (error.includes('permission') || error.includes('Permission')) return 'permission_denied'
+  if (error.includes('network') || error.includes('connect')) return 'network_error'
+  return 'execution_error'
+}
 
 /** Uniform result shape every tool returns; tools never throw to the loop. */
 export interface ToolResult {
@@ -733,6 +744,7 @@ async function read_screen(
         .filter((b): b is Anthropic.TextBlock => b.type === 'text')
         .map((b) => b.text)
         .join('\n')
+      trackEvent(Events.SCREEN_CAPTURED, { tier, method: 'cloud_vision' })
       return { ok: true, output: description }
     } catch (err) {
       return {
@@ -750,6 +762,7 @@ async function read_screen(
       logger: () => {} // suppress progress events
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     })) as { data: { text: string } }
+    trackEvent(Events.SCREEN_CAPTURED, { tier: 'free', method: 'local_ocr' })
     return {
       ok: true,
       output:
@@ -1087,9 +1100,31 @@ export async function executeTool(
     return { ok: false, error: `Invalid arguments for "${name}": ${validationError}.` }
   }
 
+  const t0 = Date.now()
   try {
-    return await fn(args, context)
+    const result = await fn(args, context)
+    const elapsed = Date.now() - t0
+    if (result.ok) {
+      trackEvent(Events.TOOL_EXECUTED, {
+        tool_name: name,
+        tier: context.tier,
+        success: true,
+        execution_time_ms: elapsed
+      })
+    } else {
+      trackEvent(Events.TOOL_ERROR, {
+        tool_name: name,
+        tier: context.tier,
+        error_type: classifyToolError(result.error ?? '')
+      })
+    }
+    return result
   } catch (err) {
+    trackEvent(Events.TOOL_ERROR, {
+      tool_name: name,
+      tier: context.tier,
+      error_type: 'execution_error'
+    })
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 }

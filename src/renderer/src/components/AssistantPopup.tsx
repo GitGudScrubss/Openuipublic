@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext'
 import AuthButton from './AuthButton'
 import SubscriptionStatus from './SubscriptionStatus'
 import UsageCounter from './UsageCounter'
+import UpdateBanner from './UpdateBanner'
 
 type VoiceState = 'idle' | 'recording' | 'transcribing' | 'processing' | 'done'
 
@@ -361,6 +362,9 @@ export default function AssistantPopup({ recordingRef, captionLockedRef, onPermi
           📁 Find file
         </div>
       </div>
+
+      {/* App version + auto-update status / actions (electron-updater). */}
+      <UpdateBanner />
     </div>
   )
 }
