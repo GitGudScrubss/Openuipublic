@@ -8,7 +8,7 @@ export type { EventName }
  * Record a telemetry event. Delegates to PostHog when initialised; silently
  * no-ops otherwise. Never throws — fire-and-forget.
  */
-export function trackEvent(event: EventName, properties: Record<string, unknown> = {}): void {
+export function trackEvent(event: EventName, properties: Record<string, string | number | boolean> = {}): void {
   try {
     posthogTrackEvent(event, properties)
   } catch {
