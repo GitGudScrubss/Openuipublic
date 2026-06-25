@@ -12,8 +12,9 @@ import { initDatabase } from './database'
 import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
 import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
 import { logout, getCurrentUser, getUserTier, startTokenRefreshLoop, stopTokenRefreshLoop } from './auth/sessionManager'
-import { initTelemetry, shutdownTelemetry, setTelemetryOptOut, isTelemetryActive } from './telemetry/posthog'
+import { initTelemetry, shutdownTelemetry, setTelemetryOptOut, isTelemetryActive, trackEvent } from './telemetry/posthog'
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdateAndRestart, openReleasesPage } from './updater/updater'
+import { Events } from './telemetry/events'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -238,6 +239,8 @@ app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.hide()
 
   applySecurityHardening()
+  initTelemetry()
+  trackEvent(Events.APP_STARTED, { platform: process.platform, version: app.getVersion() })
 
   createWindow()
   createTray()
@@ -315,6 +318,11 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+})
+
+app.on('before-quit', () => {
+  trackEvent(Events.APP_CLOSED)
+  shutdownTelemetry()
 })
 
 // Keep the app alive in the tray when the popup window is hidden/closed.

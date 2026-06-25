@@ -6,6 +6,8 @@ import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolR
 import { database } from './database'
 import { clampTierToEntitlement } from './stripe/pricing'
 import { getCurrentUserId } from './stripe/subscriptionSync'
+import { trackEvent } from './telemetry/posthog'
+import { Events } from './telemetry/events'
 
 export interface Message {
   role: 'user' | 'assistant'
@@ -176,6 +178,20 @@ When writing feedback comments:
 - Prioritise: Accessibility (WCAG AA) → Usability → Visual polish.
 - Format comments in markdown with headings and bullet lists.`
 
+function modelForTier(tier: Tier): string {
+  if (tier === 'free') return process.env.OLLAMA_MODEL ?? 'llama3:8b'
+  if (tier === 'pro') return 'claude-sonnet-4-6'
+  return process.env.GLM_MODEL ?? 'glm-4'
+}
+
+function classifyChatError(err: unknown): string {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  if (msg.includes('api key') || msg.includes('unauthorized') || msg.includes('401')) return 'auth_error'
+  if (msg.includes('timeout') || msg.includes('timed out')) return 'timeout_error'
+  if (msg.includes('network') || msg.includes('connect') || msg.includes('fetch')) return 'network_error'
+  return 'unknown_error'
+}
+
 export function emit(win: BrowserWindow, channel: string, ...args: unknown[]): void {
   if (!win.isDestroyed()) {
     win.webContents.send(channel, ...args)
@@ -302,8 +318,8 @@ export function callModel(
  * back into the conversation, and let the model continue reasoning. Task-list
  * status is pushed to the renderer as each tool moves working → done/error.
  */
-export async function handleChat(win: BrowserWindow, userMessage: string, tier: Tier): Promise<void> {
-  const turnStart = history.length // for clean rollback on failure
+export async function handleChat(win: BrowserWindow, userMessage: string, tier: Tier, fromVoice = false): Promise<void> {
+  const rollbackLen = history.length // for clean rollback on failure
 
   if (!currentConversationId) {
     currentConversationId = database.conversations.createConversation(null, 'New Chat')
@@ -345,11 +361,39 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
   // Designer needs more turns: get_file + export×N (with Vision calls) + comment×N.
   const maxTurns = isPrReview ? 32 : isDesigner ? 16 : MAX_TOOL_TURNS
 
+  const model = modelForTier(effectiveTier)
+  if (requestedTier !== effectiveTier) {
+    trackEvent(Events.MODEL_DOWNGRADE, {
+      tier,
+      requested_model: modelForTier(requestedTier),
+      downgraded_to: model
+    })
+  }
+  trackEvent(Events.CHAT_MESSAGE_SENT, {
+    tier: effectiveTier,
+    model,
+    message_length: userMessage.length,
+    has_voice: fromVoice
+  })
+
   try {
     let finalText = ''
 
     for (let turn = 0; turn < maxTurns; turn++) {
+      trackEvent(Events.MODEL_ROUTE_SELECTED, {
+        tier: effectiveTier,
+        requested_model: model,
+        actual_model: model,
+        reason: isPrReview ? 'pr_review' : isDesigner ? 'designer' : 'tier_routing'
+      })
+      const callStart = Date.now()
       const responseText = await callModel(win, effectiveTier, history, effectiveSystemPrompt)
+      trackEvent(Events.CHAT_RESPONSE_RECEIVED, {
+        tier: effectiveTier,
+        model,
+        token_count: Math.ceil(responseText.length / 4),
+        latency_ms: Date.now() - callStart
+      })
       history.push({ role: 'assistant', content: responseText })
 
       const toolCall = parseToolCall(responseText)
@@ -407,7 +451,8 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
 
     emit(win, 'openui:chat:done', { text: finalText, toolCall: null })
   } catch (err) {
-    history.length = turnStart // roll back the entire failed turn
+    history.length = rollbackLen // roll back the entire failed turn
+    trackEvent(Events.CHAT_ERROR, { tier: effectiveTier, model, error_type: classifyChatError(err) })
     const message = err instanceof Error ? err.message : String(err)
     emit(win, 'openui:chat:error', message)
   }

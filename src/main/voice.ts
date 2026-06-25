@@ -5,6 +5,8 @@ import { promisify } from 'node:util'
 import { BrowserWindow, ipcMain } from 'electron'
 import { coerceTier, handleChat } from './agent'
 import { getUserTier } from './auth/sessionManager'
+import { trackEvent } from './telemetry/posthog'
+import { Events } from './telemetry/events'
 
 function emit(win: BrowserWindow, channel: string, ...args: unknown[]): void {
   if (!win.isDestroyed()) win.webContents.send(channel, ...args)
@@ -157,6 +159,7 @@ export function registerVoiceIPC(win: BrowserWindow): void {
     // Use server-side tier for whisper routing — free tier uses local whisper.cpp
     // (if configured), pro/enterprise use the OpenAI Whisper API.
     const serverTier = getUserTier()
+    trackEvent(Events.VOICE_RECORDING_STARTED)
 
     let transcript: string
     try {
@@ -175,21 +178,31 @@ export function registerVoiceIPC(win: BrowserWindow): void {
         transcript = await transcribeWithWhisper(audioBuffer, safeMime)
       }
     } catch (err) {
+      trackEvent(Events.VOICE_TRANSCRIPTION_FAILED)
       const message = err instanceof Error ? err.message : String(err)
       emit(win, 'openui:chat:error', message)
       return
     }
 
     if (!transcript) {
+      trackEvent(Events.VOICE_TRANSCRIPTION_FAILED)
       emit(win, 'openui:chat:error', 'No speech detected in the recording.')
       return
     }
+
+    // Rough duration estimate: compressed audio at ~12 KB/s
+    const durationSeconds = Math.round(audioBuffer.byteLength / 12000)
+    trackEvent(Events.VOICE_RECORDING_COMPLETED, {
+      duration_seconds: durationSeconds,
+      tier: safeTier,
+      transcription_method: 'whisper'
+    })
 
     // Push transcript to renderer so it can show it in #transcript-bubble
     // before the agent response starts streaming.
     emit(win, 'openui:voice:transcript', transcript)
 
     // Feed the transcribed text directly into the agent router.
-    await handleChat(win, transcript, safeTier)
+    await handleChat(win, transcript, safeTier, true)
   })
 }

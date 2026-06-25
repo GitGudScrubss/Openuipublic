@@ -244,7 +244,7 @@ export async function completeAuth(
     setActiveUser(user.id)
 
     mainWindow?.webContents.send('openui:auth-success', profile)
-    identifyUser(profile.id, { email: profile.email ?? undefined, tier })
+    identifyUser(profile.id, { email: profile.email ?? '', tier })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error('[openui] completeAuth failed:', message)
