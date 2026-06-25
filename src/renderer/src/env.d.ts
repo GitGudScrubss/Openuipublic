@@ -203,6 +203,9 @@ export interface OpenUIApi {
   onUpdateDownloadProgress: (cb: (p: UpdateProgressPayload) => void) => () => void
   onUpdateDownloaded: (cb: (info: { version: string }) => void) => () => void
   onUpdateError: (cb: (e: { message: string }) => void) => () => void
+  // App settings (key/value persisted in SQLite).
+  getSetting: (key: string) => Promise<unknown>
+  setSetting: (key: string, value: unknown) => Promise<void>
 }
 
 declare global {

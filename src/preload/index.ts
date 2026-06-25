@@ -324,7 +324,12 @@ const api = {
     const fn = wrap<{ message: string }>(cb)
     ipcRenderer.on('openui:update-error', fn)
     return (): void => { ipcRenderer.removeListener('openui:update-error', fn) }
-  }
+  },
+
+  // ── App settings (key/value persisted in the SQLite settings table) ─────────
+  getSetting: (key: string): Promise<unknown> => ipcRenderer.invoke('openui:get-setting', key),
+  setSetting: (key: string, value: unknown): Promise<void> =>
+    ipcRenderer.invoke('openui:set-setting', { key, value })
 }
 
 export type OpenUIApi = typeof api

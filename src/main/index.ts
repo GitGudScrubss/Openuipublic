@@ -8,7 +8,7 @@ import { openSettingsPane, type PermissionTarget } from './permissions'
 import { registerStripeIPC, isPaymentFlowWebContents } from './stripe/checkout'
 import { registerWaitlistIPC } from './waitlist'
 import { closeBrowser } from './tools'
-import { initDatabase } from './database'
+import { initDatabase, database } from './database'
 import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
 import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
 import { logout, getCurrentUser, getUserTier, startTokenRefreshLoop, stopTokenRefreshLoop } from './auth/sessionManager'
@@ -285,12 +285,7 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('openui:get-telemetry-status', () => isTelemetryActive())
 
-  // ── Privacy consent IPC (Sub-Phase 4C) ───────────────────────────────────────
-  // Both the first-launch ConsentModal and the Settings analytics toggle flow
-  // through these channels, so the grant/deny logic lives in exactly one place.
-
-  // Opt in: persist consent, bring PostHog online (initTelemetry left it off
-  // until now), then send the opt-in event — the FIRST event a new user emits.
+  // ── Privacy consent IPC ───────────────────────────────────────────────────────
   ipcMain.handle('openui:grant-consent', async () => {
     await grantConsent()
     enableTelemetryAfterConsent()
@@ -299,9 +294,6 @@ app.whenReady().then(async () => {
     return ConsentStatus.GRANTED
   })
 
-  // Opt out: the opt-out event is the LAST thing sent. If telemetry is live it is
-  // captured now and flushed by the shutdown below; if it was never started
-  // (first-launch "Skip"), it is stashed locally to batch-send on a later opt-in.
   ipcMain.handle('openui:deny-consent', async () => {
     if (isTelemetryActive()) {
       trackEvent(Events.TELEMETRY_OPT_OUT)
@@ -314,16 +306,12 @@ app.whenReady().then(async () => {
     return ConsentStatus.DENIED
   })
 
-  // Current consent status — drives whether the renderer shows the ConsentModal
-  // on launch and the initial state of the Settings analytics toggle.
   ipcMain.handle('openui:get-consent-status', () => getConsentStatus())
 
   // Pro-tier waitlist: post an email to the Mailchimp-proxy Edge Function.
   registerWaitlistIPC()
 
   // ── Auto-update IPC (electron-updater) ──────────────────────────────────────
-  // All of these are no-ops in development (autoUpdater only runs packaged) —
-  // see ./updater/updater. The renderer surfaces them via the UpdateBanner.
   ipcMain.handle('openui:get-app-version', () => app.getVersion())
   ipcMain.handle('openui:check-for-updates', async () => {
     await checkForUpdates()
@@ -331,8 +319,18 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle('openui:download-update', () => downloadUpdate())
   ipcMain.handle('openui:install-update-restart', () => installUpdateAndRestart())
-  // macOS (unsigned) fallback: open the GitHub Releases page in the browser.
   ipcMain.handle('openui:open-releases-page', () => openReleasesPage())
+
+  // ── App settings IPC (key/value in the SQLite settings table) ───────────────
+  // Used by onboarding (`onboarding_complete`) and any future persisted prefs.
+  ipcMain.handle('openui:get-setting', (_event, key: unknown) =>
+    typeof key === 'string' ? database.settings.getSetting(key) : null
+  )
+  ipcMain.handle('openui:set-setting', (_event, payload: unknown) => {
+    const { key, value } = (payload ?? {}) as { key?: unknown; value?: unknown }
+    if (typeof key === 'string') database.settings.setSetting(key, value)
+  })
+
 
   if (win) {
     registerAgentIPC(win)
