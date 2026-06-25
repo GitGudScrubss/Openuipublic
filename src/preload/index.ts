@@ -38,6 +38,12 @@ type TierUpgradePayload = {
   effectiveTier: Tier
   currentTier: Tier
 }
+type UsageUpdatePayload = {
+  tier: Tier
+  limit: number | null
+  remaining: number | null
+  unlimited: boolean
+}
 type ConversationSummary = {
   id: string
   title: string
@@ -241,6 +247,15 @@ const api = {
     const fn = wrap<TierUpgradePayload>(cb)
     ipcRenderer.on('openui:tier-upgrade-needed', fn)
     return (): void => { ipcRenderer.removeListener('openui:tier-upgrade-needed', fn) }
+  },
+
+  // ── Daily cloud-message usage counter ─────────────────────────────────────
+  // Fired after each cloud-proxy turn (and on local turns) so the renderer can
+  // show "15/20 messages today". `unlimited` hides the number (Enterprise/local).
+  onUsageUpdate: (cb: (usage: UsageUpdatePayload) => void): (() => void) => {
+    const fn = wrap<UsageUpdatePayload>(cb)
+    ipcRenderer.on('openui:usage-update', fn)
+    return (): void => { ipcRenderer.removeListener('openui:usage-update', fn) }
   },
 
   // ── Conversations ─────────────────────────────────────────────────────────

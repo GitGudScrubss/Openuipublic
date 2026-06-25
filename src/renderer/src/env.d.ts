@@ -19,6 +19,17 @@ export interface TierUpgradePayload {
   currentTier: Tier
 }
 
+/** Daily cloud-message usage, pushed after each turn for the live counter. */
+export interface UsageUpdatePayload {
+  tier: Tier
+  /** Daily cap, or null when unlimited (Enterprise / local AI). */
+  limit: number | null
+  /** Messages remaining today, or null when unlimited. */
+  remaining: number | null
+  /** True when this turn is not metered — the counter hides the number. */
+  unlimited: boolean
+}
+
 export interface ConversationSummary {
   id: string
   title: string
@@ -165,6 +176,8 @@ export interface OpenUIApi {
   onPaymentCancelled: (cb: () => void) => () => void
   // Tier upgrade notifications.
   onTierUpgradeNeeded: (cb: (payload: TierUpgradePayload) => void) => () => void
+  // Daily cloud-message usage counter.
+  onUsageUpdate: (cb: (usage: UsageUpdatePayload) => void) => () => void
   // Conversation history.
   getConversations: () => Promise<ConversationSummary[]>
   loadConversation: (id: string) => Promise<Array<{ role: string; content: string; created_at: number }>>
