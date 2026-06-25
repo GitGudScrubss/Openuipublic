@@ -6,6 +6,13 @@ import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolR
 import { database } from './database'
 import { clampTierToEntitlement } from './stripe/pricing'
 import { getCurrentUserId } from './stripe/subscriptionSync'
+import {
+  isOllamaRunning,
+  isCloudProxyConfigured,
+  callCloudProxy,
+  classifyTaskComplexity,
+  emitLocalUsage
+} from './cloudFreeTier'
 
 export interface Message {
   role: 'user' | 'assistant'
@@ -236,10 +243,21 @@ async function callOllama(win: BrowserWindow, messages: Message[], systemPrompt:
   return full
 }
 
-async function callAnthropic(win: BrowserWindow, messages: Message[], systemPrompt: string): Promise<string> {
+// Direct-API model ids used ONLY by the local-dev fallback (no Supabase / not
+// signed in). In production every cloud turn goes through the chat-proxy Edge
+// Function, whose own model map is the source of truth for shipped users.
+const DIRECT_PRO_MODEL = 'claude-sonnet-4-6'
+const DIRECT_FREE_MODEL = 'claude-3-5-haiku-latest'
+
+async function callAnthropic(
+  win: BrowserWindow,
+  messages: Message[],
+  systemPrompt: string,
+  model: string = DIRECT_PRO_MODEL
+): Promise<string> {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   const stream = client.messages.stream({
-    model: 'claude-sonnet-4-6',
+    model,
     max_tokens: 2048,
     system: systemPrompt,
     messages: messages.map((m) => ({ role: m.role, content: m.content }))
@@ -280,20 +298,94 @@ async function callEnterprise(win: BrowserWindow, messages: Message[], systemPro
 }
 
 /**
- * Stream one model turn for the given tier and return the full text. The
- * `systemPrompt` is supplied by the caller so the same router can drive both the
+ * Cloud-first model router (Phase A onboarding). The product promise is that the
+ * app works the moment you sign in — no Ollama, no local setup — so the DEFAULT
+ * for every tier is the cloud proxy (our API keys, server-side in the Edge
+ * Function). Ollama is only ever an optional cost-saver / offline fallback.
+ *
+ * Priority:
+ *   • Free      → local Ollama if running (free + unlimited), else cloud proxy.
+ *   • Pro       → local Ollama for simple tasks if running, else cloud proxy.
+ *   • Enterprise→ cloud proxy.
+ *
+ * The user NEVER sees an "Ollama is not installed" error: a down/absent Ollama
+ * just silently routes to the cloud. `routeCloudOrDirect` adds a local-dev escape
+ * hatch (direct API keys) for when Supabase/auth isn't wired up yet.
+ *
+ * `systemPrompt` is supplied by the caller so the same router drives both the
  * interactive desktop assistant (handleChat) and the autonomous coding agent
  * (autonomous.ts), which need different instructions and tool sets.
  */
-export function callModel(
+export async function callModel(
   win: BrowserWindow,
   tier: Tier,
   messages: Message[],
   systemPrompt: string = SYSTEM_PROMPT
 ): Promise<string> {
-  if (tier === 'free') return callOllama(win, messages, systemPrompt)
-  if (tier === 'pro') return callAnthropic(win, messages, systemPrompt)
-  return callEnterprise(win, messages, systemPrompt)
+  const ollamaUp = await isOllamaRunning()
+
+  if (tier === 'free') {
+    if (ollamaUp) {
+      // Local Ollama → free + unlimited, saves our API costs.
+      emitLocalUsage(win, tier)
+      return callOllama(win, messages, systemPrompt)
+    }
+    return routeCloudOrDirect(win, 'free', messages, systemPrompt, 'free-default')
+  }
+
+  if (tier === 'pro') {
+    // Keep cheap/simple work local when Ollama is available; send the rest to cloud.
+    if (ollamaUp && !classifyTaskComplexity(messages)) {
+      emitLocalUsage(win, tier)
+      return callOllama(win, messages, systemPrompt)
+    }
+    return routeCloudOrDirect(win, 'pro', messages, systemPrompt, 'pro-default')
+  }
+
+  return routeCloudOrDirect(win, 'enterprise', messages, systemPrompt, 'enterprise-default')
+}
+
+/**
+ * Route a turn through the cloud proxy when configured (signed in + Supabase),
+ * otherwise fall back to direct provider APIs using local env keys. The direct
+ * path exists only for local development before auth/Supabase are wired up — a
+ * shipped, signed-in user always takes the proxy path.
+ *
+ * The free direct fallback never surfaces an Ollama error: if no Anthropic key
+ * is set we try local Ollama as a last resort, and if that also fails we return a
+ * neutral, friendly message rather than a raw connection error.
+ */
+async function routeCloudOrDirect(
+  win: BrowserWindow,
+  tier: Tier,
+  messages: Message[],
+  systemPrompt: string,
+  modelKey: string
+): Promise<string> {
+  if (isCloudProxyConfigured()) {
+    return callCloudProxy(win, tier, messages, systemPrompt, modelKey)
+  }
+
+  // ── Local-dev / unauthenticated fallback (direct API keys) ──────────────────
+  emitLocalUsage(win, tier)
+  if (tier === 'enterprise') return callEnterprise(win, messages, systemPrompt)
+  if (tier === 'pro') return callAnthropic(win, messages, systemPrompt, DIRECT_PRO_MODEL)
+
+  // Free fallback: prefer a direct Anthropic (Haiku) call if a key exists.
+  if (process.env.ANTHROPIC_API_KEY) {
+    return callAnthropic(win, messages, systemPrompt, DIRECT_FREE_MODEL)
+  }
+  // No cloud key configured locally — try Ollama, but degrade gracefully so the
+  // user never sees an "Ollama not installed" error if it isn't there.
+  try {
+    return await callOllama(win, messages, systemPrompt)
+  } catch {
+    const msg =
+      "I'm not able to reach an AI model right now. Sign in to use cloud AI, " +
+      'or set up local AI for offline use.'
+    emit(win, 'openui:chat:chunk', msg)
+    return msg
+  }
 }
 
 /**

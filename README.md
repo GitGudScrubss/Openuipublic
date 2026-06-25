@@ -2,13 +2,13 @@
 
 **A local-first AI desktop assistant — your personal JARVIS, running on your Mac.**
 
-OpenUI is a macOS menu-bar app built with Electron, React, and TypeScript. It provides a voice- and text-driven interface to a multi-tier AI backend: **free** (Ollama — fully local, no data leaves your machine), **pro** (Claude via Anthropic API), or **enterprise** (GLM). The assistant can control your desktop, search files, manage your calendar, read the screen, and more — all through natural conversation.
+OpenUI is a macOS menu-bar app built with Electron, React, and TypeScript. It provides a voice- and text-driven interface to a multi-tier AI backend that **works the moment you sign in — no local setup required**: **Free** includes daily cloud messages (plus unlimited local inference if you choose to install Ollama), **Pro** adds Claude 3.5 Sonnet + GPT-4o, and **Enterprise** unlocks premium models. The assistant can control your desktop, search files, manage your calendar, read the screen, and more — all through natural conversation.
 
 ---
 
 ## Project Vision
 
-OpenUI aims to be the open-source equivalent of a personal AI assistant that runs *on your machine*, not in someone's cloud. The free tier routes every prompt through a locally-hosted Ollama model — nothing touches an external server. Pro and enterprise tiers optionally use cloud APIs for more capable models, while keeping the entire tool-execution layer (keyboard/mouse control, file access, screen reading) local at all times.
+OpenUI aims to be a personal AI assistant that's effortless to start and respectful of your choices. It is **cloud-first by default** — sign in and it works, with no model to download or server to run — yet **local-capable** for anyone who wants it: install Ollama and the Free tier runs entirely on your machine, with nothing leaving it. The entire tool-execution layer (keyboard/mouse control, file access, screen reading) always runs locally, on every tier.
 
 ---
 
@@ -19,9 +19,14 @@ OpenUI aims to be the open-source equivalent of a personal AI assistant that run
 | **macOS** | 13 Ventura or later | macOS 14 Sonoma+ recommended; Accessibility API is most stable on Sonoma+ |
 | **Node.js** | 20 LTS or later | [nodejs.org](https://nodejs.org) |
 | **npm** | 10+ | Bundled with Node.js |
-| **Ollama** *(free tier)* | Latest | [ollama.com](https://ollama.com) — after install, run: `ollama pull llama3:8b` |
-| **Anthropic API key** *(pro tier)* | — | Set `ANTHROPIC_API_KEY` in your environment |
+| **Ollama** *(OPTIONAL)* | Latest | [ollama.com](https://ollama.com) — **not required**. If present (`ollama pull llama3:8b`), Free tier uses it for unlimited local/offline inference; if absent, the app works fine on the cloud. |
+| **Anthropic API key** *(read_screen + local-dev fallback)* | — | Set `ANTHROPIC_API_KEY` for screen vision and the local-dev chat fallback |
 | **OpenAI API key** *(voice input)* | — | Set `OPENAI_API_KEY` — Whisper handles speech-to-text on all tiers |
+
+> **Cloud-first:** the shipped app needs no local AI setup — sign in and chat
+> works immediately via our hosted `chat-proxy` (Free tier includes 20 cloud
+> messages/day). Ollama is purely an optional enhancement. See
+> [`ARCHITECTURE.md`](./ARCHITECTURE.md) §4 and `supabase/functions/README.md`.
 
 > **Apple Silicon (M1/M2/M3/M4):** fully supported. The release DMG ships both `arm64` and `x64` slices.
 
@@ -58,21 +63,32 @@ Required for the `read_screen` tool, which captures the display for Claude Visio
 Create a `.env` file at the project root (or export these in your shell before running):
 
 ```sh
-# Required for pro-tier chat and read_screen on pro/enterprise
+# Cloud chat (all tiers) — the app calls the chat-proxy Edge Function with these.
+# Sign-in + these two are all an end user needs for working AI.
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your-anon-key
+
+# read_screen vision (pro/enterprise) + local-dev chat fallback (before auth is wired).
+# NOTE: the shipped app's cloud chat uses the keys held by the chat-proxy Edge
+# Function (Supabase secrets), NOT this one.
 ANTHROPIC_API_KEY=sk-ant-...
 
 # Required for voice input (Whisper) on any chat tier
 OPENAI_API_KEY=sk-...
 
-# Optional — Ollama overrides (free tier defaults)
+# OPTIONAL — Ollama (local AI). Not required; if running, Free tier uses it.
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=llama3:8b
 
-# Optional — GLM / enterprise tier overrides
+# Optional — GLM / enterprise local-dev fallback overrides
 GLM_BASE_URL=http://127.0.0.1:8080/v1
 GLM_API_KEY=no-key
 GLM_MODEL=glm-4
 ```
+
+> The cloud LLM keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) must also be set as
+> **`chat-proxy` Edge Function secrets** so cloud chat runs on our keys, not the
+> client's. See `supabase/functions/README.md`.
 
 ---
 
