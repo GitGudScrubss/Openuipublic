@@ -11,8 +11,10 @@
 | **Phase 4** | Screen vision — `read_screen()` tool: `desktopCapturer` capture, Claude Vision (pro/enterprise), Tesseract.js OCR (free) | **Complete** |
 | **Phase 5** | Voice input — push-to-talk mic, MediaRecorder + AnalyserNode, Whisper transcription, auto-route to agent | **Complete** |
 | **Phase 6** | macOS permission hardening — pre-flight OS permission checks, graceful degradation, in-app System Settings modal, unhandled-rejection fixes | **Complete** |
-| **Distribution** | `electron-builder` macOS DMG config (`arm64` + `x64`), `build:mac` script, comprehensive README | **Complete** |
+| **Distribution** | `electron-builder` Windows NSIS (`x64`+`ia32`) + macOS DMG (`arm64`+`x64`); `build:win` / `build:mac` scripts; generated `.ico` / `.icns` via `scripts/convert-icon.js`; `openui://` deep-link + single-instance lock; comprehensive README | **Complete** |
 | **Phase 7** | Auth + subscription gating — Google OAuth via Supabase, SQLite persistence, tier-based model routing, Stripe checkout, voice tier routing, `AuthContext`, `TierUpgradeModal`, `ConversationList` | **Complete** |
+| **Sub-Phase 4** | Telemetry & privacy — PostHog analytics (4A core, 4B event instrumentation), opt-in privacy consent layer with `ConsentModal` + Settings toggle (4C) | **Complete** |
+| **Onboarding Phase A** | Cloud-first routing — every tier works with no local setup via the `chat-proxy` Edge Function (our keys, server-side), per-tier daily limits (`usage_tracking`), Ollama demoted to optional cost-saver/offline fallback, live usage counter, no more "Ollama required" errors | **Complete** |
 
 ---
 
@@ -116,13 +118,13 @@ react / react-dom        ^18.3.1   — UI (renderer only)
 
 > **Note:** `@nut-tree/nut-js` was removed from the npm registry; the project now depends on the drop-in fork `@nut-tree-fork/nut-js`. The lazy-loading logic in `tools.ts` tries both names so existing installs are not broken.
 
-### Distribution pipeline (`npm run build:mac`)
+### Distribution pipeline (`npm run build:win` / `npm run build:mac`)
 
 ```
-npm run build:mac
-  │
-  ├── electron-vite build     ← compiles TS; output → out/
-  └── electron-builder --mac  ← packages app; output → dist/
+npm run build:win                            npm run build:mac
+  │                                            │
+  ├── electron-vite build → out/               ├── electron-vite build → out/
+  └── electron-builder --win → dist/           └── electron-builder --mac → dist/
 ```
 
 **electron-builder configuration** (in `package.json` → `"build"` key):
@@ -131,17 +133,35 @@ npm run build:mac
 |---|---|
 | `appId` | `com.openui.app` |
 | `productName` | `OpenUI` |
+| `directories.output` | `dist/` |
+| `npmRebuild` | `true` — rebuild native `node_modules` (nut.js) against Electron's ABI |
+| `asarUnpack` | `**/*.node` — keep native bindings outside the asar so they load at runtime |
+| `extraResources` | `{ from: resources, to: resources }` — see note below |
+| `win.target` | `nsis` — `x64` |
+| `win.icon` | `resources/icon.ico` (generated; see *Icon generation*) |
+| `win.artifactName` | `OpenUI.Setup.${version}.${ext}` → `dist/OpenUI.Setup.0.1.0.exe` |
+| `nsis` | interactive installer: `oneClick: false`, `allowToChangeInstallationDirectory: true`, `shortcutName: OpenUI`, `uninstallDisplayName: OpenUI`, `license: LICENSE`, `installerLanguages: [en_US]`, `language: 1033` |
 | `mac.category` | `public.app-category.productivity` |
 | `mac.target` | `dmg` — `arm64` + `x64` |
-| `mac.icon` | `resources/icon.icns` (must be provided; see README) |
-| `directories.output` | `dist/` |
+| `mac.icon` | `resources/icon.icns` (generated when png2icons is installed) |
 
-**Files packaged** (`files` array):
-- `out/**/*` — compiled main / preload / renderer bundles
-- `resources/**/*` — tray icon PNGs
-- `package.json` — electron-builder reads it at runtime for the `main` entry point
+**Files packaged.** electron-builder always collects the production-`dependencies` subtree of `node_modules` automatically (verified in the build log: `@anthropic-ai/sdk`, `openai`, `ollama`, `tesseract.js`, `@nut-tree-fork/*`, `node-osascript` are all packed; dev-dependencies and the orphaned `better-sqlite3` are not). The explicit `files` array additionally includes `out/**/*` (compiled bundles), `resources/**/*`, and `package.json` (read at runtime for the `main` entry point).
 
-The macOS DMG build must be run on a macOS host. Cross-compilation to macOS from Windows/Linux is not supported.
+> **`extraResources` (runtime resource path).** `resourcePath()` in `index.ts` resolves packaged assets from `process.resourcesPath/resources/…`. The `files` array only places `resources/` *inside* the asar, which `process.resourcesPath` does not point at — so without `extraResources` the tray icon would be missing in the installed app. `extraResources: [{ from: 'resources', to: 'resources' }]` copies the folder to `<app>/resources/resources/`, exactly where `resourcePath()` reads it.
+
+> **`nodeGypRebuild` is intentionally NOT set.** It runs `node-gyp rebuild` against a `binding.gyp` in the project root; OpenUI has no first-party native addon (its only native dependency, nut.js, ships prebuilt binaries), so enabling it would fail the build with "binding.gyp not found". `npmRebuild: true` is the correct switch for rebuilding native modules that live in `node_modules`.
+
+### Icon generation (`scripts/convert-icon.js`)
+
+OpenUI ships no branded source art, so `scripts/convert-icon.js` synthesises a 1024×1024 "orb" PNG (`resources/icon.png`) with Node's `zlib` alone, then emits `resources/icon.ico` (and `resources/icon.icns` on installs that have the optional `png2icons` dev-dependency). The script prefers `png2icons` when present and otherwise falls back to a built-in multi-size PNG-in-ICO encoder (16–256 px; the 256 px entry satisfies electron-builder's minimum-icon-size check). It runs on `postinstall` and via `npm run icons`, so the icons exist before any packaging step — including on the `windows-latest` CI runner.
+
+### Deep linking & single-instance (`index.ts`)
+
+The packaged Windows app registers `app.setAsDefaultProtocolClient('openui')` and acquires `app.requestSingleInstanceLock()`. Windows delivers an `openui://…` launch as a `process.argv` entry to a *second* process; the `second-instance` handler extracts that URL and forwards the existing window (macOS instead emits `open-url` on the original process). The single-instance lock also prevents a duplicate tray icon. `handleDeepLink()` is currently a window-surfacing stub — the OAuth/auth consumer is not part of this build — and is the integration point for the future auth callback.
+
+### Cross-platform notes
+
+Each installer must be built on its target OS: the Windows `.exe` on Windows (platform-specific native-module binaries) and the macOS `.dmg` on macOS (Apple toolchain). Cross-compiling native modules is not supported. The cross-platform runtime features (chat, voice, `read_screen`, nut.js mouse/keyboard) work on both; the macOS-only tools (`open_app`, `search_files`, `control_calendar`) return a graceful unsupported-platform error elsewhere.
 
 ---
 
@@ -244,17 +264,80 @@ openui:quit IPC  ──→  app.quit()
 
 ## 4. LLM Agent Backend (`src/main/agent.ts`)
 
-### Model router
+### Model router — cloud-first (Onboarding Phase A)
 
-The `tier` parameter passed to `window.openui.chat()` selects the backend:
+The product promise: **sign in and it works — no Ollama, no local setup.** So the
+**default for every tier is the cloud**, served by the `chat-proxy` Supabase Edge
+Function which holds OUR LLM API keys server-side (`src/main/cloudFreeTier.ts`).
+Ollama is an **optional** enhancement only: a cost-saver for Free and an offline
+fallback. A missing/stopped Ollama is never an error — the turn silently routes to
+the cloud.
 
-| Tier | Package | Model | Endpoint |
-|---|---|---|---|
-| `'free'` | `ollama` | `llama3:8b` (override: `OLLAMA_MODEL`) | `http://127.0.0.1:11434` (override: `OLLAMA_HOST`) |
-| `'pro'` | `@anthropic-ai/sdk` | `claude-sonnet-4-6` (hard-coded) | Anthropic API (key: `ANTHROPIC_API_KEY`) |
-| `'enterprise'` | `openai` | `glm-4` (override: `GLM_MODEL`) | `http://127.0.0.1:8080/v1` (override: `GLM_BASE_URL`, key: `GLM_API_KEY`) |
+`callModel(win, tier, messages, systemPrompt)` is an async router:
 
-All three clients are created inside their respective call functions (not at module load), so environment variables are read at the time of the first request.
+```
+callModel(tier)
+  │
+  ├─ ollamaUp = await isOllamaRunning()   (2s probe of /api/tags; false on any failure)
+  │
+  ├─ free:
+  │     ├─ ollamaUp → callOllama          (local, unlimited, saves our $; emitLocalUsage)
+  │     └─ else     → routeCloudOrDirect('free-default')
+  │
+  ├─ pro:
+  │     ├─ ollamaUp AND !classifyTaskComplexity(messages) → callOllama   (cheap work stays local)
+  │     └─ else     → routeCloudOrDirect('pro-default')
+  │
+  └─ enterprise:     → routeCloudOrDirect('enterprise-default')
+
+routeCloudOrDirect(modelKey)
+  ├─ isCloudProxyConfigured()  (Supabase env set AND a user is signed in)
+  │     └─ true  → callCloudProxy(win, tier, messages, system, modelKey)   ← SHIPPED PATH
+  │     └─ false → local-dev direct fallback (uses .env keys):
+  │                   enterprise → callEnterprise (GLM)
+  │                   pro        → callAnthropic(DIRECT_PRO_MODEL = claude-sonnet-4-6)
+  │                   free       → callAnthropic(DIRECT_FREE_MODEL = claude-3-5-haiku)
+  │                                or Ollama, degrading to a neutral message — never an Ollama error
+```
+
+`callCloudProxy` streams over the **same** `openui:chat:chunk` channel as the local
+paths, so the agentic loop is provider-agnostic. It:
+
+1. Resolves the signed-in user's Supabase access token (refreshing once if expired).
+2. `fetch`es `${SUPABASE_URL}/functions/v1/chat-proxy` with `Authorization: Bearer <token>`,
+   sending `{ messages, system, modelKey, stream: true }`.
+3. Parses the normalized SSE (`data: {"delta":"…"}` … `data: [DONE]`) the Edge
+   Function emits regardless of the underlying provider.
+4. On **429** (daily limit hit) it does NOT error: it streams a friendly upsell,
+   emits `openui:usage-update { remaining: 0 }`, and fires `openui:tier-upgrade-needed`.
+5. Reads `x-ratelimit-{tier,limit,remaining}` headers and emits `openui:usage-update`
+   → the renderer's `UsageCounter` shows "15/20 today".
+
+The clients (`ollama`, `@anthropic-ai/sdk`, `openai`) are created inside their call
+functions (not at module load), so env vars are read at first-request time.
+
+### Cloud proxy + daily limits (`chat-proxy` Edge Function)
+
+```
+callCloudProxy (main)                       chat-proxy (Deno Edge Function, OUR keys)
+─────────────────────                       ─────────────────────────────────────────
+fetch /functions/v1/chat-proxy   ─────────▶ verify access token → user
+  Authorization: Bearer <userJWT>           tier = user.app_metadata.tier  (authoritative)
+  { messages, system, modelKey, stream }    count = usage_tracking[user, today]
+                                            count ≥ DAILY_LIMIT[tier]?
+                                              └─ yes → 429 { rate_limited, remaining:0, limit }
+                                            resolveModel(modelKey, tier)  (gated to tier)
+                                              ├─ anthropic → api.anthropic.com/v1/messages
+                                              └─ openai    → api.openai.com/v1/chat/completions
+                                            usage_tracking ++ (upsert count+1)
+  normalized SSE  ◀───────────────────────  normalizeSSE(provider stream) + rate-limit headers
+  data: {"delta":"…"} … [DONE]
+```
+
+`DAILY_LIMIT` in the function mirrors `dailyMessageLimit()` in `pricing.ts`
+(Free 20, Pro 500, Enterprise unlimited). The `usage_tracking` table
+(`supabase/migrations/001_create_usage_tracking.sql`) is keyed `(user_id, date)`
+so the count resets each day. See `supabase/functions/README.md`.
 
 ### Streaming flow
 
@@ -340,12 +423,19 @@ extension icons, or any Electron app):
 
 | Variable | Default | Used by |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | *(required for pro tier and read_screen on pro/enterprise)* | `callAnthropic`, `read_screen` |
-| `OLLAMA_HOST` | `http://127.0.0.1:11434` | `callOllama` |
-| `OLLAMA_MODEL` | `llama3:8b` | `callOllama` |
-| `GLM_BASE_URL` | `http://127.0.0.1:8080/v1` | `callEnterprise` |
-| `GLM_API_KEY` | `no-key` | `callEnterprise` |
-| `GLM_MODEL` | `glm-4` | `callEnterprise` |
+| `SUPABASE_URL` | *(required for the cloud chat path)* | `callCloudProxy` (Edge Function URL), auth, sync |
+| `SUPABASE_ANON_KEY` | *(required for the cloud chat path)* | `callCloudProxy` (`apikey` header), auth |
+| `ANTHROPIC_API_KEY` | *(read_screen vision + local-dev chat fallback only)* | `read_screen`, `callAnthropic` fallback |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | `isOllamaRunning`, `callOllama` *(optional)* |
+| `OLLAMA_MODEL` | `llama3:8b` | `callOllama` *(optional)* |
+| `GLM_BASE_URL` | `http://127.0.0.1:8080/v1` | `callEnterprise` *(dev fallback)* |
+| `GLM_API_KEY` | `no-key` | `callEnterprise` *(dev fallback)* |
+| `GLM_MODEL` | `glm-4` | `callEnterprise` *(dev fallback)* |
+
+> In the **shipped** app every chat turn routes through `chat-proxy`, whose own
+> `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (Supabase secrets) are the source of
+> truth for cloud chat. The local `ANTHROPIC_API_KEY` / `GLM_*` keys above only
+> drive the dev fallback used before Supabase auth is wired up.
 
 ---
 
@@ -766,7 +856,7 @@ CREATE INDEX idx_messages_conv ON messages(conversation_id, created_at);
 
 ### Overview
 
-OpenUI uses Supabase Auth (Google OAuth) for sign-in. Auth state is stored locally in SQLite; the renderer holds it in `AuthContext`. The anonymous user path guarantees local Ollama models work without any account.
+OpenUI uses Supabase Auth (Google OAuth) for sign-in. Auth state is stored locally in SQLite; the renderer holds it in `AuthContext`. Once signed in, chat works immediately via the cloud proxy — no local model or Ollama install is required (see §4, "Model router — cloud-first").
 
 ```
 User clicks "Sign in"
@@ -788,13 +878,12 @@ User clicks "Sign in"
                                               └─ AuthContext: setUser(u) → re-render AuthButton + SubscriptionStatus
 ```
 
-**Anonymous user path (no account required):**
+**No-Ollama path (cloud-first):**
 ```
-handleChat() called with no current user
-  ├─ checkOllamaReachable() → false? → emit('openui:chat:error', 'Please sign in…')
-  └─ true → getOrCreateAnonymousUser()
-               ├─ INSERT OR IGNORE into users (id='anonymous', tier='free')
-               └─ emit('openui:auth-success', { id:'anonymous', tier:'free', name:'Local User' })
+handleChat() — Ollama is NEVER a prerequisite
+  ├─ isOllamaRunning() → true  → use local Ollama (free + unlimited)
+  └─ isOllamaRunning() → false → callCloudProxy (our keys via chat-proxy)
+                                  → the app just works; no "install Ollama" error is ever shown
 ```
 
 ### IPC channels added in Phase 7
@@ -824,10 +913,9 @@ The IPC `tier` field from the renderer is treated as a hint only — the main pr
 ```
 handleChat(win, userMessage, clientTier)
   │
-  ├─ 1. getCurrentUser() — from in-process sessionManager
-  │       └─ null? → checkOllamaReachable()
-  │                     ├─ false → emit('openui:chat:error', 'Please sign in…')  STOP
-  │                     └─ true  → getOrCreateAnonymousUser() (tier='free')
+  ├─ 1. clampTierToEntitlement(clientTier, getCurrentUserId())
+  │       └─ caps the untrusted renderer tier to the signed-in user's entitlement
+  │          (no-op for local dev with no signed-in user)
   │
   ├─ 2. getTierForUser(userId)
   │       ├─ id='anonymous' → 'free'  (never hits network)
@@ -929,3 +1017,136 @@ Subscription lifecycle
 ```
 
 The `typecheck` script already exists in `package.json`; it just needs to be wired into the CI pipeline.
+
+---
+
+## 17. Telemetry & Privacy (Sub-Phase 4)
+
+OpenUI ships an **opt-in** anonymous analytics layer built on PostHog. It is
+designed for macOS App Store guidelines and GDPR compliance: nothing is
+collected — and the PostHog client is never even initialised — until the user
+explicitly grants consent.
+
+### Module map (`src/main/telemetry/`)
+
+| File | Responsibility |
+|---|---|
+| `events.ts` | Single source of truth for event names + property shapes (`Events` / `EVENTS`). |
+| `posthog.ts` | PostHog client lifecycle: consent-gated init, identify, capture, opt-out, shutdown. |
+| `consent.ts` | Consent state machine (`ConsentStatus`), persisted to the `settings` table; local pending-event queue. |
+| `index.ts` | `trackEvent()` wrapper — never throws; no-ops when telemetry is disabled. |
+
+### What data IS collected (only after opt-in)
+
+- App opens, closes, crashes, and version / auto-update events
+- Feature usage — which tools run, which models / tiers are selected, voice & vision usage
+- Performance metrics — response latency, tool execution time, token counts
+- Subscription tier, OS platform, and app version
+- A random anonymous device id (`<userData>/.telemetry-id`), replaced by the
+  Supabase user id only after sign-in (`identifyUser`)
+
+See `events.ts` for the exhaustive list of event names and their property shapes.
+
+### What is NEVER collected
+
+- Chat messages or voice recordings (only lengths / counts, never content)
+- File contents or file paths
+- Screenshots, screen contents, or OCR text
+- Personal data beyond the post-login user id
+- API keys or any secret from `process.env`
+
+While consent is UNKNOWN or DENIED there is **no network egress** from the
+telemetry layer at all: the PostHog client object is `null`, so `trackEvent()`
+is a zero-cost no-op.
+
+### Consent flow
+
+```
+First launch
+  app.whenReady → initDatabase() → await initTelemetry()
+        │
+        └─ getConsentStatus() === GRANTED ?  ── no ──▶ PostHog stays OFF (client = null)
+                  │ yes
+                  └─▶ startClient()  (PostHog online)
+
+Renderer mount (App.tsx)
+  getConsentStatus() === 'unknown' ?  ── yes ──▶ <ConsentModal/>
+        │
+        ├─ "Allow Analytics" ─▶ openui:grant-consent
+        │      main: grantConsent() → enableTelemetryAfterConsent() (client online,
+        │            flush pending) → trackEvent(TELEMETRY_OPT_IN) → openui:consent-updated
+        │
+        └─ "Skip" ──────────▶ openui:deny-consent
+               main: (client active ? trackEvent(TELEMETRY_OPT_OUT) : recordPendingEvent(…))
+                     → denyConsent() → shutdownTelemetry() → openui:consent-updated
+```
+
+`ConsentModal` is **non-blocking** and **non-manipulative**: "Allow Analytics"
+and "Skip" are the same size and visual weight (no dark pattern). "Skip" persists
+a permanent `DENIED` (`telemetry_consent` in the `settings` table), so the prompt
+never reappears on later launches — but the choice is always reversible from
+Settings. Dismissing with "Skip" lets the user start using the app immediately.
+
+Because PostHog is not initialised on a first launch, `TELEMETRY_OPT_IN` is
+literally the first event a consenting user ever sends. `TELEMETRY_OPT_OUT` is
+the LAST event before shutdown; if telemetry was never started (the user pressed
+"Skip"), the opt-out is stashed locally (`telemetry_pending_events`) and
+batch-sent only if they later opt back in.
+
+### Changing the choice later (Settings)
+
+`AssistantPopup`'s header has a gear button that opens `SettingsModal`, which
+hosts the **Anonymous Usage Analytics** switch ("Help us improve OpenUI by
+sharing anonymous usage data. No personal data is ever collected."):
+
+- Toggle **ON** → `grantConsent()` → PostHog initialised → `TELEMETRY_OPT_IN`.
+- Toggle **OFF** → `TELEMETRY_OPT_OUT` (last event) → `denyConsent()` → PostHog
+  shut down and flushed.
+
+The switch reads its initial state from `getConsentStatus()` and stays in sync
+via the `openui:consent-updated` push.
+
+### Consent state (persisted in the `settings` table)
+
+| Key | Values | Meaning |
+|---|---|---|
+| `telemetry_consent` | `unknown` \| `granted` \| `denied` | Authoritative consent status. |
+| `telemetry_opt_out` | `true` \| `false` | Low-level mirror kept for `setTelemetryOptOut`. |
+| `telemetry_pending_events` | `string[]` | Events recorded while disabled; batch-sent on next opt-in. |
+
+### IPC channels (Sub-Phase 4C)
+
+| Channel | Direction | Payload | Purpose |
+|---|---|---|---|
+| `openui:grant-consent` | Renderer → Main (invoke) | *(none)* | Opt in; init PostHog; emit `TELEMETRY_OPT_IN`. |
+| `openui:deny-consent` | Renderer → Main (invoke) | *(none)* | Opt out; emit `TELEMETRY_OPT_OUT`; shut PostHog down. |
+| `openui:get-consent-status` | Renderer → Main (invoke) | *(none)* | Returns the current `ConsentStatus`. |
+| `openui:consent-updated` | Main → Renderer | `ConsentStatus` | Consent changed; keeps modal / toggle in sync. |
+| `openui:set-telemetry-opt-out` | Renderer → Main (invoke) | `boolean` | Low-level opt-out (Sub-Phase 4A). |
+| `openui:get-telemetry-status` | Renderer → Main (invoke) | *(none)* | Returns whether the client is active. |
+
+### PostHog integration details
+
+- **Package:** `posthog-node`. Host defaults to `https://us.i.posthog.com`
+  (override `POSTHOG_HOST`); requires `POSTHOG_API_KEY` — with no key, telemetry
+  is a permanent no-op regardless of consent.
+- **Batching:** `flushAt: 20`, `flushInterval: 10000` ms. `shutdownTelemetry()`
+  flushes on `before-quit`.
+- **Identity:** anonymous device id until `identifyUser(userId)` runs after auth;
+  `resetTelemetryIdentity()` returns to the device id on logout.
+- **Safety:** the `trackEvent()` wrapper in `telemetry/index.ts` swallows all
+  errors so analytics can never disrupt a user-facing flow.
+
+### How to opt out
+
+- **In-app:** Settings (gear icon) → turn **Anonymous Usage Analytics** off.
+  This is available at any time, before or after the first-launch prompt.
+- **At first launch:** press **Skip** in the consent prompt.
+- **By configuration:** unset `POSTHOG_API_KEY` to disable telemetry build-wide.
+
+### Environment variables
+
+| Variable | Default | Used by |
+|---|---|---|
+| `POSTHOG_API_KEY` | *(unset — disables telemetry entirely)* | `initTelemetry`, `enableTelemetryAfterConsent` |
+| `POSTHOG_HOST` | `https://us.i.posthog.com` | PostHog client |

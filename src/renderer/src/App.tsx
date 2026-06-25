@@ -3,6 +3,7 @@ import AssistantPopup from './components/AssistantPopup'
 import TaskListPopup from './components/TaskListPopup'
 import PermissionModal from './components/PermissionModal'
 import OnboardingWizard from './components/onboarding/OnboardingWizard'
+import ConsentModal from './components/ConsentModal'
 import { useAssistantAnimations } from './hooks/useAssistantAnimations'
 import { useOnboarding } from './hooks/useOnboarding'
 import { AuthProvider } from './context/AuthContext'
@@ -25,6 +26,7 @@ function AppShell(): JSX.Element {
   const captionLockedRef = useRef<boolean>(false)
 
   const [permissionNeeded, setPermissionNeeded] = useState<PermissionTarget | null>(null)
+  const [consentNeeded, setConsentNeeded] = useState(false)
 
   const { isComplete, isLoading, completeOnboarding } = useOnboarding()
   // The first message typed in onboarding, replayed once the chat mounts.
@@ -38,6 +40,21 @@ function AppShell(): JSX.Element {
     return window.openui.onPermissionDenied((permission) => {
       setPermissionNeeded(permission as PermissionTarget)
     })
+  }, [])
+
+  // First-launch privacy consent: show the prompt only while status is UNKNOWN.
+  // "Skip" persists a permanent DENIED, so this never reappears on later launches.
+  useEffect(() => {
+    let cancelled = false
+    window.openui
+      .getConsentStatus()
+      .then((status) => {
+        if (!cancelled && status === 'unknown') setConsentNeeded(true)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const handleBackdrop = (e: React.MouseEvent<HTMLDivElement>): void => {
@@ -89,6 +106,7 @@ function AppShell(): JSX.Element {
           )}
         </>
       )}
+      {consentNeeded && <ConsentModal onClose={() => setConsentNeeded(false)} />}
     </div>
   )
 }

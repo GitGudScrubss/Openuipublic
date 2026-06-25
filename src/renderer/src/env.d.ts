@@ -3,6 +3,9 @@
 /** Which OS permission needs to be granted before the tool can proceed. */
 export type PermissionTarget = 'accessibility' | 'microphone'
 
+/** Privacy consent state for anonymous usage analytics. */
+export type ConsentStatus = 'unknown' | 'granted' | 'denied'
+
 export type Tier = 'free' | 'pro' | 'enterprise'
 
 export interface User {
@@ -19,10 +22,36 @@ export interface TierUpgradePayload {
   currentTier: Tier
 }
 
+/** Daily cloud-message usage, pushed after each turn for the live counter. */
+export interface UsageUpdatePayload {
+  tier: Tier
+  /** Daily cap, or null when unlimited (Enterprise / local AI). */
+  limit: number | null
+  /** Messages remaining today, or null when unlimited. */
+  remaining: number | null
+  /** True when this turn is not metered — the counter hides the number. */
+  unlimited: boolean
+}
+
 export interface ConversationSummary {
   id: string
   title: string
   created_at: number
+}
+
+/** Emitted when a newer version is found on the update feed. */
+export interface UpdateAvailablePayload {
+  version: string
+  /** false on unsigned macOS — the UI offers a browser download instead. */
+  canAutoUpdate: boolean
+}
+
+/** Per-chunk progress while an update downloads. */
+export interface UpdateProgressPayload {
+  percent: number
+  bytesPerSecond: number
+  transferred: number
+  total: number
 }
 
 export interface ToolCallPayload {
@@ -91,6 +120,11 @@ export interface AuthUser {
   tier: string
 }
 
+/** Result of a `joinWaitlist` call. */
+export type WaitlistResult =
+  | { ok: true; alreadySubscribed?: boolean }
+  | { ok: false; error: string }
+
 export interface OpenUIApi {
   // Window
   hide: () => void
@@ -131,6 +165,8 @@ export interface OpenUIApi {
   logout: () => Promise<void>
   getUser: () => Promise<AuthUser | null>
   getTier: () => Promise<string>
+  // Pro-tier waitlist (Mailchimp proxy via Edge Function).
+  joinWaitlist: (email: string) => Promise<WaitlistResult>
   onAuthSuccess: (cb: (user: AuthUser) => void) => () => void
   onAuthError: (cb: (error: { message: string }) => void) => () => void
   onAuthLogout: (cb: () => void) => () => void
@@ -143,9 +179,30 @@ export interface OpenUIApi {
   onPaymentCancelled: (cb: () => void) => () => void
   // Tier upgrade notifications.
   onTierUpgradeNeeded: (cb: (payload: TierUpgradePayload) => void) => () => void
+  // Daily cloud-message usage counter.
+  onUsageUpdate: (cb: (usage: UsageUpdatePayload) => void) => () => void
   // Conversation history.
   getConversations: () => Promise<ConversationSummary[]>
   loadConversation: (id: string) => Promise<Array<{ role: string; content: string; created_at: number }>>
+  // Telemetry.
+  setTelemetryOptOut: (optOut: boolean) => Promise<void>
+  getTelemetryStatus: () => Promise<boolean>
+  // Privacy consent — first-launch ConsentModal + Settings analytics toggle.
+  grantConsent: () => Promise<ConsentStatus>
+  denyConsent: () => Promise<ConsentStatus>
+  getConsentStatus: () => Promise<ConsentStatus>
+  onConsentUpdated: (cb: (status: ConsentStatus) => void) => () => void
+  // Auto-update (electron-updater). No-ops in dev; events stay silent there.
+  getAppVersion: () => Promise<string>
+  checkForUpdates: () => Promise<{ currentVersion: string }>
+  downloadUpdate: () => Promise<void>
+  installUpdateAndRestart: () => Promise<void>
+  openReleasesPage: () => Promise<void>
+  onUpdateAvailable: (cb: (info: UpdateAvailablePayload) => void) => () => void
+  onUpdateNotAvailable: (cb: (info: { version: string }) => void) => () => void
+  onUpdateDownloadProgress: (cb: (p: UpdateProgressPayload) => void) => () => void
+  onUpdateDownloaded: (cb: (info: { version: string }) => void) => () => void
+  onUpdateError: (cb: (e: { message: string }) => void) => () => void
   // App settings (key/value persisted in SQLite).
   getSetting: (key: string) => Promise<unknown>
   setSetting: (key: string, value: unknown) => Promise<void>

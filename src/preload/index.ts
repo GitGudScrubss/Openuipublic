@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 type Tier = 'free' | 'pro' | 'enterprise'
 type PermissionTarget = 'accessibility' | 'microphone'
+type ConsentStatus = 'unknown' | 'granted' | 'denied'
 type TaskSource = 'todo' | 'github'
 type InterviewState = 'idle' | 'asking' | 'listening' | 'evaluating' | 'complete'
 type IpcListener = Parameters<typeof ipcRenderer.on>[1]
@@ -38,11 +39,20 @@ type TierUpgradePayload = {
   effectiveTier: Tier
   currentTier: Tier
 }
+type UsageUpdatePayload = {
+  tier: Tier
+  limit: number | null
+  remaining: number | null
+  unlimited: boolean
+}
 type ConversationSummary = {
   id: string
   title: string
   created_at: number
 }
+type WaitlistResult =
+  | { ok: true; alreadySubscribed?: boolean }
+  | { ok: false; error: string }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const wrap = <T>(cb: (data: T) => void): IpcListener => ((_: any, data: T) => cb(data)) as IpcListener
@@ -210,6 +220,11 @@ const api = {
   getUser: (): Promise<AuthUser | null> => ipcRenderer.invoke('openui:get-user'),
   getTier: (): Promise<string> => ipcRenderer.invoke('openui:get-tier'),
 
+  // Join the Pro-tier waitlist (proxied to Mailchimp via the waitlist Edge
+  // Function). Resolves to { ok, alreadySubscribed?, error? }.
+  joinWaitlist: (email: string): Promise<WaitlistResult> =>
+    ipcRenderer.invoke('openui:join-waitlist', email),
+
   onAuthSuccess: (cb: (user: AuthUser) => void): (() => void) => {
     const fn = wrap<AuthUser>(cb)
     ipcRenderer.on('openui:auth-success', fn)
@@ -235,12 +250,81 @@ const api = {
     return (): void => { ipcRenderer.removeListener('openui:tier-upgrade-needed', fn) }
   },
 
+  // ── Daily cloud-message usage counter ─────────────────────────────────────
+  // Fired after each cloud-proxy turn (and on local turns) so the renderer can
+  // show "15/20 messages today". `unlimited` hides the number (Enterprise/local).
+  onUsageUpdate: (cb: (usage: UsageUpdatePayload) => void): (() => void) => {
+    const fn = wrap<UsageUpdatePayload>(cb)
+    ipcRenderer.on('openui:usage-update', fn)
+    return (): void => { ipcRenderer.removeListener('openui:usage-update', fn) }
+  },
+
   // ── Conversations ─────────────────────────────────────────────────────────
   getConversations: (): Promise<ConversationSummary[]> =>
     ipcRenderer.invoke('openui:get-conversations'),
 
   loadConversation: (id: string): Promise<Array<{ role: string; content: string; created_at: number }>> =>
     ipcRenderer.invoke('openui:load-conversation', id),
+
+  // ── Telemetry ────────────────────────────────────────────────────────────────
+  setTelemetryOptOut: (optOut: boolean): Promise<void> =>
+    ipcRenderer.invoke('openui:set-telemetry-opt-out', optOut),
+
+  getTelemetryStatus: (): Promise<boolean> =>
+    ipcRenderer.invoke('openui:get-telemetry-status'),
+
+  // Privacy consent — first-launch ConsentModal + the Settings analytics toggle.
+  grantConsent: (): Promise<ConsentStatus> => ipcRenderer.invoke('openui:grant-consent'),
+  denyConsent: (): Promise<ConsentStatus> => ipcRenderer.invoke('openui:deny-consent'),
+  getConsentStatus: (): Promise<ConsentStatus> => ipcRenderer.invoke('openui:get-consent-status'),
+
+  onConsentUpdated: (cb: (status: ConsentStatus) => void): (() => void) => {
+    const fn = wrap<ConsentStatus>(cb)
+    ipcRenderer.on('openui:consent-updated', fn)
+    return (): void => { ipcRenderer.removeListener('openui:consent-updated', fn) }
+  },
+
+  // ── Auto-update (electron-updater) ──────────────────────────────────────────
+  // Invokers are no-ops in dev (autoUpdater only runs packaged); the on* event
+  // streams stay silent there too. Driven by the UpdateBanner component.
+  getAppVersion: (): Promise<string> => ipcRenderer.invoke('openui:get-app-version'),
+  checkForUpdates: (): Promise<{ currentVersion: string }> =>
+    ipcRenderer.invoke('openui:check-for-updates'),
+  downloadUpdate: (): Promise<void> => ipcRenderer.invoke('openui:download-update'),
+  installUpdateAndRestart: (): Promise<void> => ipcRenderer.invoke('openui:install-update-restart'),
+  openReleasesPage: (): Promise<void> => ipcRenderer.invoke('openui:open-releases-page'),
+
+  onUpdateAvailable: (cb: (info: { version: string; canAutoUpdate: boolean }) => void): (() => void) => {
+    const fn = wrap<{ version: string; canAutoUpdate: boolean }>(cb)
+    ipcRenderer.on('openui:update-available', fn)
+    return (): void => { ipcRenderer.removeListener('openui:update-available', fn) }
+  },
+
+  onUpdateNotAvailable: (cb: (info: { version: string }) => void): (() => void) => {
+    const fn = wrap<{ version: string }>(cb)
+    ipcRenderer.on('openui:update-not-available', fn)
+    return (): void => { ipcRenderer.removeListener('openui:update-not-available', fn) }
+  },
+
+  onUpdateDownloadProgress: (
+    cb: (p: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void
+  ): (() => void) => {
+    const fn = wrap<{ percent: number; bytesPerSecond: number; transferred: number; total: number }>(cb)
+    ipcRenderer.on('openui:update-download-progress', fn)
+    return (): void => { ipcRenderer.removeListener('openui:update-download-progress', fn) }
+  },
+
+  onUpdateDownloaded: (cb: (info: { version: string }) => void): (() => void) => {
+    const fn = wrap<{ version: string }>(cb)
+    ipcRenderer.on('openui:update-downloaded', fn)
+    return (): void => { ipcRenderer.removeListener('openui:update-downloaded', fn) }
+  },
+
+  onUpdateError: (cb: (e: { message: string }) => void): (() => void) => {
+    const fn = wrap<{ message: string }>(cb)
+    ipcRenderer.on('openui:update-error', fn)
+    return (): void => { ipcRenderer.removeListener('openui:update-error', fn) }
+  },
 
   // ── App settings (key/value persisted in the SQLite settings table) ─────────
   getSetting: (key: string): Promise<unknown> => ipcRenderer.invoke('openui:get-setting', key),

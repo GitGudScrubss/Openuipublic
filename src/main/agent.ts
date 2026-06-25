@@ -6,6 +6,15 @@ import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolR
 import { database } from './database'
 import { clampTierToEntitlement } from './stripe/pricing'
 import { getCurrentUserId } from './stripe/subscriptionSync'
+import {
+  isOllamaRunning,
+  isCloudProxyConfigured,
+  callCloudProxy,
+  classifyTaskComplexity,
+  emitLocalUsage
+} from './cloudFreeTier'
+import { trackEvent } from './telemetry/posthog'
+import { Events } from './telemetry/events'
 
 export interface Message {
   role: 'user' | 'assistant'
@@ -176,6 +185,20 @@ When writing feedback comments:
 - Prioritise: Accessibility (WCAG AA) → Usability → Visual polish.
 - Format comments in markdown with headings and bullet lists.`
 
+function modelForTier(tier: Tier): string {
+  if (tier === 'free') return process.env.OLLAMA_MODEL ?? 'llama3:8b'
+  if (tier === 'pro') return 'claude-sonnet-4-6'
+  return process.env.GLM_MODEL ?? 'glm-4'
+}
+
+function classifyChatError(err: unknown): string {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  if (msg.includes('api key') || msg.includes('unauthorized') || msg.includes('401')) return 'auth_error'
+  if (msg.includes('timeout') || msg.includes('timed out')) return 'timeout_error'
+  if (msg.includes('network') || msg.includes('connect') || msg.includes('fetch')) return 'network_error'
+  return 'unknown_error'
+}
+
 export function emit(win: BrowserWindow, channel: string, ...args: unknown[]): void {
   if (!win.isDestroyed()) {
     win.webContents.send(channel, ...args)
@@ -236,10 +259,21 @@ async function callOllama(win: BrowserWindow, messages: Message[], systemPrompt:
   return full
 }
 
-async function callAnthropic(win: BrowserWindow, messages: Message[], systemPrompt: string): Promise<string> {
+// Direct-API model ids used ONLY by the local-dev fallback (no Supabase / not
+// signed in). In production every cloud turn goes through the chat-proxy Edge
+// Function, whose own model map is the source of truth for shipped users.
+const DIRECT_PRO_MODEL = 'claude-sonnet-4-6'
+const DIRECT_FREE_MODEL = 'claude-3-5-haiku-latest'
+
+async function callAnthropic(
+  win: BrowserWindow,
+  messages: Message[],
+  systemPrompt: string,
+  model: string = DIRECT_PRO_MODEL
+): Promise<string> {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   const stream = client.messages.stream({
-    model: 'claude-sonnet-4-6',
+    model,
     max_tokens: 2048,
     system: systemPrompt,
     messages: messages.map((m) => ({ role: m.role, content: m.content }))
@@ -280,20 +314,94 @@ async function callEnterprise(win: BrowserWindow, messages: Message[], systemPro
 }
 
 /**
- * Stream one model turn for the given tier and return the full text. The
- * `systemPrompt` is supplied by the caller so the same router can drive both the
+ * Cloud-first model router (Phase A onboarding). The product promise is that the
+ * app works the moment you sign in — no Ollama, no local setup — so the DEFAULT
+ * for every tier is the cloud proxy (our API keys, server-side in the Edge
+ * Function). Ollama is only ever an optional cost-saver / offline fallback.
+ *
+ * Priority:
+ *   • Free      → local Ollama if running (free + unlimited), else cloud proxy.
+ *   • Pro       → local Ollama for simple tasks if running, else cloud proxy.
+ *   • Enterprise→ cloud proxy.
+ *
+ * The user NEVER sees an "Ollama is not installed" error: a down/absent Ollama
+ * just silently routes to the cloud. `routeCloudOrDirect` adds a local-dev escape
+ * hatch (direct API keys) for when Supabase/auth isn't wired up yet.
+ *
+ * `systemPrompt` is supplied by the caller so the same router drives both the
  * interactive desktop assistant (handleChat) and the autonomous coding agent
  * (autonomous.ts), which need different instructions and tool sets.
  */
-export function callModel(
+export async function callModel(
   win: BrowserWindow,
   tier: Tier,
   messages: Message[],
   systemPrompt: string = SYSTEM_PROMPT
 ): Promise<string> {
-  if (tier === 'free') return callOllama(win, messages, systemPrompt)
-  if (tier === 'pro') return callAnthropic(win, messages, systemPrompt)
-  return callEnterprise(win, messages, systemPrompt)
+  const ollamaUp = await isOllamaRunning()
+
+  if (tier === 'free') {
+    if (ollamaUp) {
+      // Local Ollama → free + unlimited, saves our API costs.
+      emitLocalUsage(win, tier)
+      return callOllama(win, messages, systemPrompt)
+    }
+    return routeCloudOrDirect(win, 'free', messages, systemPrompt, 'free-default')
+  }
+
+  if (tier === 'pro') {
+    // Keep cheap/simple work local when Ollama is available; send the rest to cloud.
+    if (ollamaUp && !classifyTaskComplexity(messages)) {
+      emitLocalUsage(win, tier)
+      return callOllama(win, messages, systemPrompt)
+    }
+    return routeCloudOrDirect(win, 'pro', messages, systemPrompt, 'pro-default')
+  }
+
+  return routeCloudOrDirect(win, 'enterprise', messages, systemPrompt, 'enterprise-default')
+}
+
+/**
+ * Route a turn through the cloud proxy when configured (signed in + Supabase),
+ * otherwise fall back to direct provider APIs using local env keys. The direct
+ * path exists only for local development before auth/Supabase are wired up — a
+ * shipped, signed-in user always takes the proxy path.
+ *
+ * The free direct fallback never surfaces an Ollama error: if no Anthropic key
+ * is set we try local Ollama as a last resort, and if that also fails we return a
+ * neutral, friendly message rather than a raw connection error.
+ */
+async function routeCloudOrDirect(
+  win: BrowserWindow,
+  tier: Tier,
+  messages: Message[],
+  systemPrompt: string,
+  modelKey: string
+): Promise<string> {
+  if (isCloudProxyConfigured()) {
+    return callCloudProxy(win, tier, messages, systemPrompt, modelKey)
+  }
+
+  // ── Local-dev / unauthenticated fallback (direct API keys) ──────────────────
+  emitLocalUsage(win, tier)
+  if (tier === 'enterprise') return callEnterprise(win, messages, systemPrompt)
+  if (tier === 'pro') return callAnthropic(win, messages, systemPrompt, DIRECT_PRO_MODEL)
+
+  // Free fallback: prefer a direct Anthropic (Haiku) call if a key exists.
+  if (process.env.ANTHROPIC_API_KEY) {
+    return callAnthropic(win, messages, systemPrompt, DIRECT_FREE_MODEL)
+  }
+  // No cloud key configured locally — try Ollama, but degrade gracefully so the
+  // user never sees an "Ollama not installed" error if it isn't there.
+  try {
+    return await callOllama(win, messages, systemPrompt)
+  } catch {
+    const msg =
+      "I'm not able to reach an AI model right now. Sign in to use cloud AI, " +
+      'or set up local AI for offline use.'
+    emit(win, 'openui:chat:chunk', msg)
+    return msg
+  }
 }
 
 /**
@@ -302,8 +410,8 @@ export function callModel(
  * back into the conversation, and let the model continue reasoning. Task-list
  * status is pushed to the renderer as each tool moves working → done/error.
  */
-export async function handleChat(win: BrowserWindow, userMessage: string, tier: Tier): Promise<void> {
-  const turnStart = history.length // for clean rollback on failure
+export async function handleChat(win: BrowserWindow, userMessage: string, tier: Tier, fromVoice = false): Promise<void> {
+  const rollbackLen = history.length // for clean rollback on failure
 
   if (!currentConversationId) {
     currentConversationId = database.conversations.createConversation(null, 'New Chat')
@@ -345,11 +453,39 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
   // Designer needs more turns: get_file + export×N (with Vision calls) + comment×N.
   const maxTurns = isPrReview ? 32 : isDesigner ? 16 : MAX_TOOL_TURNS
 
+  const model = modelForTier(effectiveTier)
+  if (requestedTier !== effectiveTier) {
+    trackEvent(Events.MODEL_DOWNGRADE, {
+      tier,
+      requested_model: modelForTier(requestedTier),
+      downgraded_to: model
+    })
+  }
+  trackEvent(Events.CHAT_MESSAGE_SENT, {
+    tier: effectiveTier,
+    model,
+    message_length: userMessage.length,
+    has_voice: fromVoice
+  })
+
   try {
     let finalText = ''
 
     for (let turn = 0; turn < maxTurns; turn++) {
+      trackEvent(Events.MODEL_ROUTE_SELECTED, {
+        tier: effectiveTier,
+        requested_model: model,
+        actual_model: model,
+        reason: isPrReview ? 'pr_review' : isDesigner ? 'designer' : 'tier_routing'
+      })
+      const callStart = Date.now()
       const responseText = await callModel(win, effectiveTier, history, effectiveSystemPrompt)
+      trackEvent(Events.CHAT_RESPONSE_RECEIVED, {
+        tier: effectiveTier,
+        model,
+        token_count: Math.ceil(responseText.length / 4),
+        latency_ms: Date.now() - callStart
+      })
       history.push({ role: 'assistant', content: responseText })
 
       const toolCall = parseToolCall(responseText)
@@ -407,7 +543,8 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
 
     emit(win, 'openui:chat:done', { text: finalText, toolCall: null })
   } catch (err) {
-    history.length = turnStart // roll back the entire failed turn
+    history.length = rollbackLen // roll back the entire failed turn
+    trackEvent(Events.CHAT_ERROR, { tier: effectiveTier, model, error_type: classifyChatError(err) })
     const message = err instanceof Error ? err.message : String(err)
     emit(win, 'openui:chat:error', message)
   }

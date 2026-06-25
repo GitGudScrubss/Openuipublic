@@ -2,6 +2,18 @@
  * pricing.ts — the single source of truth for OpenUI's subscription tiers, the
  * models each tier may use, and the helpers that gate model routing.
  *
+ * CLOUD-FIRST MODEL (Phase A onboarding): every tier — including Free — works
+ * out of the box by routing to cloud APIs through the `chat-proxy` Supabase Edge
+ * Function (which holds OUR API keys server-side). Ollama is an OPTIONAL local
+ * enhancement, never a prerequisite: when it is running we prefer it for the Free
+ * tier to save API costs, and as an offline fallback. The app must NEVER require
+ * the user to install anything to get a working assistant.
+ *
+ * Each tier declares a `dailyMessageLimit` (cloud messages/day, enforced
+ * server-side by the Edge Function against the `usage_tracking` table) and a
+ * nested `models` map split into `cloud` (routed via the proxy) and `local`
+ * (routed via Ollama when available).
+ *
  * SECURITY: Stripe *price ids* (`price_…`) are NOT secret — they are safe to ship
  * in the Electron app and are used only to tell the `create-checkout` Edge
  * Function which price the user picked. The Stripe *secret key* never appears
@@ -15,40 +27,58 @@ export const TIERS = {
     id: 'free',
     name: 'Free',
     price: 0,
-    description: '100% local AI, privacy-first',
-    features: ['Local models via Ollama', 'Basic OS automation', 'Local OCR vision', 'Whisper voice input'],
-    models: ['llama3:8b', 'phi3:mini'],
+    description: 'Get started with AI assistance — no setup required',
+    features: [
+      '20 cloud messages per day',
+      'Local AI (unlimited) if Ollama is installed',
+      'Basic OS automation',
+      'Local OCR screen reading',
+      'Voice input'
+    ],
+    dailyMessageLimit: 20,
+    models: {
+      cloud: ['claude-3-5-haiku'],
+      local: ['llama3:8b', 'phi3:mini']
+    },
     stripePriceId: null // No Stripe price for free
   },
   pro: {
     id: 'pro',
     name: 'Pro',
     price: 19,
-    description: 'Cloud AI + Advanced automation',
+    description: 'Advanced AI with cloud models and vision',
     features: [
-      'Everything in Free',
-      'Claude 3.5 Sonnet + GPT-4o routing',
-      'Vision model (screen understanding)',
+      '500 cloud messages per day',
+      'Claude 3.5 Sonnet + GPT-4o',
+      'Cloud vision (screen understanding)',
       'Advanced multi-step automation',
       'Priority processing'
     ],
-    models: ['claude-3-5-sonnet', 'gpt-4o', 'llama3:70b'],
+    dailyMessageLimit: 500,
+    models: {
+      cloud: ['claude-3-5-sonnet', 'gpt-4o', 'llama3:70b'],
+      local: ['llama3:8b', 'phi3:mini']
+    },
     stripePriceId: process.env.STRIPE_PRO_PRICE_ID
   },
   enterprise: {
     id: 'enterprise',
     name: 'Enterprise',
     price: 49,
-    description: 'Maximum power, custom models',
+    description: 'Maximum power with custom models',
     features: [
-      'Everything in Pro',
-      'GLM 5.2 + custom model endpoints',
+      'Unlimited cloud messages',
+      'GLM 5.2 + all premium models',
       'Unlimited vision calls',
       'Workflow chaining',
       'Custom MCP servers',
       'Priority support'
     ],
-    models: ['glm-5.2', 'claude-3-5-sonnet', 'gpt-4o', 'llama3:405b'],
+    dailyMessageLimit: Infinity,
+    models: {
+      cloud: ['glm-5.2', 'claude-3-5-sonnet', 'gpt-4o', 'llama3:405b'],
+      local: ['llama3:8b', 'phi3:mini']
+    },
     stripePriceId: process.env.STRIPE_ENTERPRISE_PRICE_ID
   }
 } as const
@@ -67,14 +97,22 @@ const LOCAL_MODEL_RE = /^(llama|phi|mistral|qwen|gemma|codellama|deepseek|tinyll
 
 /**
  * Is `model` allowed for `tier`? True when the model is listed in the tier's
- * `models` array, or (free tier only) when it looks like a local Ollama model.
+ * `models.cloud` or `models.local` arrays, or (free tier only) when it looks like
+ * a local Ollama model the user pulled themselves.
  */
 export function isModelAllowedForTier(model: string, tier: TierId): boolean {
   const def = TIERS[tier]
   if (!def) return false
-  if ((def.models as readonly string[]).includes(model)) return true
+  const cloud = def.models.cloud as readonly string[]
+  const local = def.models.local as readonly string[]
+  if (cloud.includes(model) || local.includes(model)) return true
   if (tier === 'free' && (LOCAL_MODEL_RE.test(model) || model.includes(':'))) return true
   return false
+}
+
+/** The maximum cloud messages a tier may send per day (Infinity = unlimited). */
+export function dailyMessageLimit(tier: TierId): number {
+  return TIERS[tier]?.dailyMessageLimit ?? TIERS.free.dailyMessageLimit
 }
 
 /**

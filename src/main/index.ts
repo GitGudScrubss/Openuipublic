@@ -6,11 +6,16 @@ import { registerInterviewerIPC } from './interviewer'
 import { startScheduler } from './scheduler'
 import { openSettingsPane, type PermissionTarget } from './permissions'
 import { registerStripeIPC, isPaymentFlowWebContents } from './stripe/checkout'
+import { registerWaitlistIPC } from './waitlist'
 import { closeBrowser } from './tools'
 import { initDatabase, database } from './database'
 import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
 import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
 import { logout, getCurrentUser, getUserTier, startTokenRefreshLoop, stopTokenRefreshLoop } from './auth/sessionManager'
+import { initTelemetry, enableTelemetryAfterConsent, shutdownTelemetry, setTelemetryOptOut, isTelemetryActive, trackEvent } from './telemetry/posthog'
+import { grantConsent, denyConsent, getConsentStatus, recordPendingEvent, ConsentStatus } from './telemetry/consent'
+import { initUpdater, checkForUpdates, downloadUpdate, installUpdateAndRestart, openReleasesPage } from './updater/updater'
+import { Events } from './telemetry/events'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -227,13 +232,15 @@ function createTray(): void {
 // Windows) exits immediately and hands its argv to the primary instance.
 registerDeepLinkProtocol()
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   initDatabase()
+  await initTelemetry()
 
   // True menu-bar app: no Dock icon on macOS.
   if (process.platform === 'darwin') app.dock?.hide()
 
   applySecurityHardening()
+  trackEvent(Events.APP_STARTED, { platform: process.platform, version: app.getVersion() })
 
   createWindow()
   createTray()
@@ -272,10 +279,50 @@ app.whenReady().then(() => {
   // Cached subscription tier ('free' when unknown/expired).
   ipcMain.handle('openui:get-tier', () => getUserTier())
 
+  // ── Telemetry IPC ────────────────────────────────────────────────────────────
+  ipcMain.handle('openui:set-telemetry-opt-out', (_event, optOut: unknown) => {
+    setTelemetryOptOut(optOut === true)
+  })
+  ipcMain.handle('openui:get-telemetry-status', () => isTelemetryActive())
+
+  // ── Privacy consent IPC ───────────────────────────────────────────────────────
+  ipcMain.handle('openui:grant-consent', async () => {
+    await grantConsent()
+    enableTelemetryAfterConsent()
+    trackEvent(Events.TELEMETRY_OPT_IN)
+    win?.webContents.send('openui:consent-updated', ConsentStatus.GRANTED)
+    return ConsentStatus.GRANTED
+  })
+
+  ipcMain.handle('openui:deny-consent', async () => {
+    if (isTelemetryActive()) {
+      trackEvent(Events.TELEMETRY_OPT_OUT)
+    } else {
+      recordPendingEvent(Events.TELEMETRY_OPT_OUT)
+    }
+    await denyConsent()
+    shutdownTelemetry()
+    win?.webContents.send('openui:consent-updated', ConsentStatus.DENIED)
+    return ConsentStatus.DENIED
+  })
+
+  ipcMain.handle('openui:get-consent-status', () => getConsentStatus())
+
+  // Pro-tier waitlist: post an email to the Mailchimp-proxy Edge Function.
+  registerWaitlistIPC()
+
+  // ── Auto-update IPC (electron-updater) ──────────────────────────────────────
+  ipcMain.handle('openui:get-app-version', () => app.getVersion())
+  ipcMain.handle('openui:check-for-updates', async () => {
+    await checkForUpdates()
+    return { currentVersion: app.getVersion() }
+  })
+  ipcMain.handle('openui:download-update', () => downloadUpdate())
+  ipcMain.handle('openui:install-update-restart', () => installUpdateAndRestart())
+  ipcMain.handle('openui:open-releases-page', () => openReleasesPage())
+
   // ── App settings IPC (key/value in the SQLite settings table) ───────────────
   // Used by onboarding (`onboarding_complete`) and any future persisted prefs.
-  // The key is validated to a string before hitting the DB; values round-trip
-  // as JSON via the settings repository.
   ipcMain.handle('openui:get-setting', (_event, key: unknown) =>
     typeof key === 'string' ? database.settings.getSetting(key) : null
   )
@@ -283,6 +330,7 @@ app.whenReady().then(() => {
     const { key, value } = (payload ?? {}) as { key?: unknown; value?: unknown }
     if (typeof key === 'string') database.settings.setSetting(key, value)
   })
+
 
   if (win) {
     registerAgentIPC(win)
@@ -293,6 +341,9 @@ app.whenReady().then(() => {
     startScheduler(win)
     // Stripe/subscription IPC + periodic sync loop (idles until a user signs in).
     registerStripeIPC(win)
+    // Auto-update via electron-updater + GitHub Releases. Schedules its own
+    // checks (30s after launch, every 4h, and on focus) and is inert in dev.
+    initUpdater(win)
   }
 
   app.on('activate', () => {
@@ -300,14 +351,20 @@ app.whenReady().then(() => {
   })
 })
 
+app.on('before-quit', () => {
+  trackEvent(Events.APP_CLOSED)
+  shutdownTelemetry()
+})
+
 // Keep the app alive in the tray when the popup window is hidden/closed.
 app.on('window-all-closed', () => {
   // Intentionally do not quit — the tray icon keeps OpenUI running.
 })
 
-// Gracefully close the Playwright browser (if open) before the process exits.
+// Gracefully close the Playwright browser (if open) and flush PostHog before the process exits.
 app.on('before-quit', () => {
   closeBrowser().catch(() => {})
+  shutdownTelemetry()
 })
 
 // Release auth resources on shutdown: stop the proactive token-refresh timer.
