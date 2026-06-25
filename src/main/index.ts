@@ -11,6 +11,7 @@ import { initDatabase } from './database'
 import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
 import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
 import { logout, getCurrentUser, getUserTier, startTokenRefreshLoop, stopTokenRefreshLoop } from './auth/sessionManager'
+import { initUpdater, checkForUpdates, downloadUpdate, installUpdateAndRestart, openReleasesPage } from './updater/updater'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -272,6 +273,19 @@ app.whenReady().then(() => {
   // Cached subscription tier ('free' when unknown/expired).
   ipcMain.handle('openui:get-tier', () => getUserTier())
 
+  // ── Auto-update IPC (electron-updater) ──────────────────────────────────────
+  // All of these are no-ops in development (autoUpdater only runs packaged) —
+  // see ./updater/updater. The renderer surfaces them via the UpdateBanner.
+  ipcMain.handle('openui:get-app-version', () => app.getVersion())
+  ipcMain.handle('openui:check-for-updates', async () => {
+    await checkForUpdates()
+    return { currentVersion: app.getVersion() }
+  })
+  ipcMain.handle('openui:download-update', () => downloadUpdate())
+  ipcMain.handle('openui:install-update-restart', () => installUpdateAndRestart())
+  // macOS (unsigned) fallback: open the GitHub Releases page in the browser.
+  ipcMain.handle('openui:open-releases-page', () => openReleasesPage())
+
   if (win) {
     registerAgentIPC(win)
     registerConversationIPC(win)
@@ -281,6 +295,9 @@ app.whenReady().then(() => {
     startScheduler(win)
     // Stripe/subscription IPC + periodic sync loop (idles until a user signs in).
     registerStripeIPC(win)
+    // Auto-update via electron-updater + GitHub Releases. Schedules its own
+    // checks (30s after launch, every 4h, and on focus) and is inert in dev.
+    initUpdater(win)
   }
 
   app.on('activate', () => {
