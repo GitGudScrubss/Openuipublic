@@ -3,12 +3,15 @@ import type { PermissionTarget } from '../env'
 import { useAuth } from '../context/AuthContext'
 import AuthButton from './AuthButton'
 import SubscriptionStatus from './SubscriptionStatus'
+import SignInBanner from './SignInBanner'
 import UsageCounter from './UsageCounter'
 import UpdateBanner from './UpdateBanner'
 import UpdateProgress from './UpdateProgress'
 import UpdateReady from './UpdateReady'
 import SettingsModal from './SettingsModal'
 import { useUpdater } from '../hooks/useUpdater'
+import OllamaSuggestion from './OllamaSuggestion'
+import LocalAIStatus from './LocalAIStatus'
 
 type VoiceState = 'idle' | 'recording' | 'transcribing' | 'processing' | 'done'
 
@@ -17,6 +20,11 @@ interface Props {
   captionLockedRef: MutableRefObject<boolean>
   /** Called when an OS permission is missing; triggers the PermissionModal in App. */
   onPermissionNeeded?: (permission: PermissionTarget) => void
+  /**
+   * First message handed over from onboarding. Sent once on mount so its
+   * streamed reply lands here, making the wizard-to-chat hand-off seamless.
+   */
+  initialMessage?: string | null
 }
 
 /** Prefer opus/webm; fall back to whatever the browser supports. */
@@ -25,12 +33,19 @@ function pickMimeType(): string {
   return candidates.find((t) => MediaRecorder.isTypeSupported(t)) ?? ''
 }
 
-export default function AssistantPopup({ recordingRef, captionLockedRef, onPermissionNeeded }: Props): JSX.Element {
+export default function AssistantPopup({
+  recordingRef,
+  captionLockedRef,
+  onPermissionNeeded,
+  initialMessage
+}: Props): JSX.Element {
   const { tier } = useAuth()
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [transcript, setTranscript] = useState<string | null>(null)
   const [inputText, setInputText] = useState('')
+  const initialSentRef = useRef(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showLocalAIToast, setShowLocalAIToast] = useState(false)
 
   const { updateState, appVersion, checkForUpdates, downloadUpdate, installAndRestart, openDownloadPage, dismiss } =
     useUpdater()
@@ -81,11 +96,18 @@ export default function AssistantPopup({ recordingRef, captionLockedRef, onPermi
       setCaption('') // clear so onChunk can stream into a blank caption
     })
 
+    // Fired by the 60-second Ollama polling loop when local AI comes online.
+    const offLocalAI = window.openui.onLocalAIAvailable(() => {
+      setShowLocalAIToast(true)
+      setTimeout(() => setShowLocalAIToast(false), 4000)
+    })
+
     return () => {
       offChunk()
       offDone()
       offError()
       offTranscript()
+      offLocalAI()
     }
   }, [setCaption, captionLockedRef])
 
@@ -237,6 +259,15 @@ export default function AssistantPopup({ recordingRef, captionLockedRef, onPermi
     [voiceState, captionLockedRef, setCaption]
   )
 
+  // Fire the message handed over from onboarding exactly once, after the IPC
+  // listeners above are wired so the streamed reply is captured here.
+  useEffect(() => {
+    if (initialMessage && !initialSentRef.current) {
+      initialSentRef.current = true
+      void handleSend(initialMessage)
+    }
+  }, [initialMessage, handleSend])
+
   const isRecording = voiceState === 'recording'
   const isBusy = voiceState === 'transcribing' || voiceState === 'processing'
 
@@ -304,6 +335,9 @@ export default function AssistantPopup({ recordingRef, captionLockedRef, onPermi
           <AuthButton />
         </div>
       </div>
+
+      {/* Returning-but-signed-out prompt (hidden while signed in) */}
+      <SignInBanner />
 
       {/* Update banners — shown above the main content when relevant */}
       {onboardingComplete && updateState.status === 'available' && (
@@ -391,6 +425,9 @@ export default function AssistantPopup({ recordingRef, captionLockedRef, onPermi
         <p id="transcript-text">{transcript ?? ''}</p>
       </div>
 
+      {/* Ollama suggestion card — shown 2 min after mount if Ollama is absent */}
+      <OllamaSuggestion />
+
       {/* Input strip */}
       <div className="input-strip">
         <svg
@@ -448,6 +485,32 @@ export default function AssistantPopup({ recordingRef, captionLockedRef, onPermi
           updateStatus={updateState.status}
           onCheckForUpdates={checkForUpdates}
         />
+      )}
+
+      {/* Local AI status footer */}
+      <LocalAIStatus />
+
+      {/* Toast: shown briefly when Ollama is detected running for the first time */}
+      {showLocalAIToast && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 60,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'rgba(28,28,30,0.88)',
+            color: '#fff',
+            fontSize: 12,
+            fontWeight: 500,
+            fontFamily: '-apple-system, sans-serif',
+            borderRadius: 20,
+            padding: '6px 14px',
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none'
+          }}
+        >
+          Local AI detected! Switching to unlimited local mode.
+        </div>
       )}
     </div>
   )
