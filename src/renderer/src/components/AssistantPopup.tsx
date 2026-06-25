@@ -6,7 +6,10 @@ import SubscriptionStatus from './SubscriptionStatus'
 import SignInBanner from './SignInBanner'
 import UsageCounter from './UsageCounter'
 import UpdateBanner from './UpdateBanner'
+import UpdateProgress from './UpdateProgress'
+import UpdateReady from './UpdateReady'
 import SettingsModal from './SettingsModal'
+import { useUpdater } from '../hooks/useUpdater'
 import OllamaSuggestion from './OllamaSuggestion'
 import LocalAIStatus from './LocalAIStatus'
 
@@ -43,6 +46,13 @@ export default function AssistantPopup({
   const initialSentRef = useRef(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showLocalAIToast, setShowLocalAIToast] = useState(false)
+
+  const { updateState, appVersion, checkForUpdates, downloadUpdate, installAndRestart, openDownloadPage, dismiss } =
+    useUpdater()
+
+  // Suppress update banners during onboarding (flag set by the onboarding wizard).
+  const onboardingComplete = localStorage.getItem('openui:onboarding-complete') !== 'false'
+  const isMac = navigator.platform.toLowerCase().includes('mac')
 
   // Imperative refs — caption and bars are managed outside React state so
   // GSAP and rAF writes don't conflict with React's reconciler.
@@ -282,6 +292,7 @@ export default function AssistantPopup({
             title="Settings"
             onClick={() => setShowSettings(true)}
             style={{
+              position: 'relative',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -305,6 +316,21 @@ export default function AssistantPopup({
                 strokeLinejoin="round"
               />
             </svg>
+            {/* Green dot when a downloaded update is waiting to be installed */}
+            {updateState.status === 'downloaded' && (
+              <span
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  right: 2,
+                  width: 5,
+                  height: 5,
+                  borderRadius: '50%',
+                  background: '#34c759',
+                  border: '1px solid rgba(255,255,255,0.9)',
+                }}
+              />
+            )}
           </button>
           <AuthButton />
         </div>
@@ -312,6 +338,26 @@ export default function AssistantPopup({
 
       {/* Returning-but-signed-out prompt (hidden while signed in) */}
       <SignInBanner />
+
+      {/* Update banners — shown above the main content when relevant */}
+      {onboardingComplete && updateState.status === 'available' && (
+        <UpdateBanner
+          version={updateState.version ?? ''}
+          isMac={isMac}
+          onDownload={updateState.canAutoUpdate ? downloadUpdate : openDownloadPage}
+          onDismiss={dismiss}
+        />
+      )}
+      {updateState.status === 'downloading' && updateState.downloadProgress && (
+        <UpdateProgress {...updateState.downloadProgress} />
+      )}
+      {onboardingComplete && updateState.status === 'downloaded' && (
+        <UpdateReady
+          version={updateState.version ?? ''}
+          onRestart={installAndRestart}
+          onDismiss={dismiss}
+        />
+      )}
 
       {/* Mic stage */}
       <div className="mic-stage">
@@ -432,10 +478,14 @@ export default function AssistantPopup({
         </div>
       </div>
 
-      {/* App version + auto-update status / actions (electron-updater). */}
-      <UpdateBanner />
-
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          appVersion={appVersion}
+          updateStatus={updateState.status}
+          onCheckForUpdates={checkForUpdates}
+        />
+      )}
 
       {/* Local AI status footer */}
       <LocalAIStatus />
