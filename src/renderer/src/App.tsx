@@ -3,23 +3,18 @@ import AssistantPopup from './components/AssistantPopup'
 import TaskListPopup from './components/TaskListPopup'
 import PermissionModal from './components/PermissionModal'
 import { useAssistantAnimations } from './hooks/useAssistantAnimations'
+import { AuthProvider } from './context/AuthContext'
 import type { PermissionTarget } from './env'
 
-export default function App(): JSX.Element {
+function AppShell(): JSX.Element {
   const overlayRef = useRef<HTMLDivElement>(null)
-
-  // Shared refs passed to both the animations hook and AssistantPopup so they
-  // can coordinate without triggering re-renders.
   const recordingRef = useRef<boolean>(false)
   const captionLockedRef = useRef<boolean>(false)
 
-  // null = no modal; otherwise shows the permission guidance modal.
   const [permissionNeeded, setPermissionNeeded] = useState<PermissionTarget | null>(null)
 
   useAssistantAnimations(overlayRef, recordingRef, captionLockedRef)
 
-  // Subscribe to permission-denied events pushed by the main process when a
-  // tool detects missing OS permissions (e.g. Accessibility for nut.js).
   useEffect(() => {
     return window.openui.onPermissionDenied((permission) => {
       setPermissionNeeded(permission as PermissionTarget)
@@ -59,5 +54,13 @@ export default function App(): JSX.Element {
         />
       )}
     </div>
+  )
+}
+
+export default function App(): JSX.Element {
+  return (
+    <AuthProvider>
+      <AppShell />
+    </AuthProvider>
   )
 }

@@ -48,7 +48,13 @@
           ]
         }
       ],
-      "icon": "resources/icon.icns"
+      "icon": "resources/icon.icns",
+      "protocols": [
+        {
+          "name": "OpenUI Auth",
+          "schemes": ["openui"]
+        }
+      ]
     },
     "dmg": {
       "title": "${productName} ${version}"
@@ -87,6 +93,7 @@
     "tesseract.js": "^5.1.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

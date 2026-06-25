@@ -1,6 +1,6 @@
 import { app, BrowserWindow, Tray, Menu, ipcMain, screen, nativeImage, session, shell } from 'electron'
 import { join } from 'path'
-import { registerAgentIPC } from './agent'
+import { registerAgentIPC, registerConversationIPC } from './agent'
 import { registerVoiceIPC } from './voice'
 import { registerInterviewerIPC } from './interviewer'
 import { startScheduler } from './scheduler'
@@ -274,6 +274,7 @@ app.whenReady().then(() => {
 
   if (win) {
     registerAgentIPC(win)
+    registerConversationIPC(win)
     registerVoiceIPC(win)
     registerInterviewerIPC(win)
     // Phase 8: activity monitor + Autonomous Coding Mode IPC.

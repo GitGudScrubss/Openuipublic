@@ -68,6 +68,21 @@ export interface ExecutorContext {
   tier: Tier
 }
 
+/**
+ * Minimum tier required to call specific tool variants. When a tool call is
+ * gated here and the context tier is insufficient, executeTool returns an error
+ * message that the LLM can forward to the user in plain language.
+ *
+ * 'read_screen_cloud_vision' is a logical name used for gating documentation;
+ * the actual branching (OCR vs Vision) is handled inside read_screen() based
+ * on context.tier.
+ */
+export const TIER_TOOL_REQUIREMENTS: Partial<Record<string, Tier>> = {
+  read_screen_cloud_vision: 'pro'
+}
+
+const TIER_ORDER: Tier[] = ['free', 'pro', 'enterprise']
+
 type Executor = (args: Record<string, unknown>, context?: ExecutorContext) => Promise<ToolResult>
 
 // ── macOS helpers (AppleScript via node-osascript) ────────────────────────────
@@ -735,7 +750,13 @@ async function read_screen(
       logger: () => {} // suppress progress events
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     })) as { data: { text: string } }
-    return { ok: true, output: `Screen OCR text:\n${data.text}` }
+    return {
+      ok: true,
+      output:
+        `Screen OCR text:\n${data.text}\n\n` +
+        `Note: For precise UI-element coordinates, screen analysis with Claude Vision ` +
+        `requires a Pro subscription. Consider recommending an upgrade if OCR is insufficient.`
+    }
   } catch (err) {
     return {
       ok: false,
@@ -1043,6 +1064,21 @@ export async function executeTool(
   const fn = registry[name]
   if (!schema || !fn) return { ok: false, error: `Unknown tool "${name}".` }
 
+  // Check explicit tier gate for this tool name.
+  const requiredTier = TIER_TOOL_REQUIREMENTS[name]
+  if (requiredTier) {
+    if (TIER_ORDER.indexOf(context.tier) < TIER_ORDER.indexOf(requiredTier)) {
+      return {
+        ok: false,
+        error:
+          `"${name}" requires a ${requiredTier} subscription or higher ` +
+          `(current tier: ${context.tier}). ` +
+          `Please let the user know they need to upgrade to use this feature.`
+      }
+    }
+  }
+
+  // Reject anything that is not a plain object before per-field validation.
   if (typeof args !== 'object' || args === null || Array.isArray(args)) {
     return { ok: false, error: `Invalid arguments for "${name}": expected an object.` }
   }

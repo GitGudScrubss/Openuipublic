@@ -324,6 +324,17 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
   // no user is signed in (e.g. local dev) — see clampTierToEntitlement.
   const requestedTier: Tier = isPrReview || isDesigner ? 'pro' : tier
   const effectiveTier: Tier = clampTierToEntitlement(requestedTier, getCurrentUserId())
+
+  // If the client requested a higher tier than the server allows, notify the
+  // renderer so it can show the upgrade modal.
+  if (tier !== effectiveTier && tier !== 'free') {
+    emit(win, 'openui:tier-upgrade-needed', {
+      requestedTier: tier,
+      effectiveTier,
+      currentTier: effectiveTier
+    })
+  }
+
   const effectiveSystemPrompt = isPrReview
     ? PR_REVIEW_SYSTEM_PROMPT
     : isDesigner
@@ -366,6 +377,16 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
       // can show a modal guiding the user to System Settings.
       if (result.permissionDenied) {
         emit(win, 'openui:permission:denied', result.permissionDenied)
+      }
+
+      // Free-tier read_screen succeeds via local OCR but cloud vision is
+      // available on Pro — proactively show the upgrade prompt.
+      if (toolCall.tool === 'read_screen' && effectiveTier === 'free') {
+        emit(win, 'openui:tier-upgrade-needed', {
+          requestedTier: 'pro',
+          effectiveTier: 'free',
+          currentTier: 'free'
+        })
       }
 
       emit(win, 'openui:task:update', {
@@ -420,4 +441,19 @@ export function registerAgentIPC(win: BrowserWindow): void {
     await handleChat(win, message, coerceTier(tier))
   })
   ipcMain.on('openui:clear-history', () => clearHistory())
+}
+
+export function registerConversationIPC(win: BrowserWindow): void {
+  ipcMain.handle('openui:get-conversations', async () => {
+    const userId = getCurrentUserId()
+    if (!userId) return []
+    return database.conversations.getConversationsByUser(userId)
+  })
+
+  ipcMain.handle('openui:load-conversation', async (_event, conversationId: unknown) => {
+    if (typeof conversationId !== 'string') return []
+    return database.messages.getMessagesByConversation(conversationId)
+  })
+
+  win // referenced to satisfy linter — win is used for future push events
 }

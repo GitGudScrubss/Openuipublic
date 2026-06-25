@@ -3,6 +3,28 @@
 /** Which OS permission needs to be granted before the tool can proceed. */
 export type PermissionTarget = 'accessibility' | 'microphone'
 
+export type Tier = 'free' | 'pro' | 'enterprise'
+
+export interface User {
+  id: string
+  email: string | null
+  name: string | null
+  avatar_url: string | null
+  tier: Tier
+}
+
+export interface TierUpgradePayload {
+  requestedTier: Tier
+  effectiveTier: Tier
+  currentTier: Tier
+}
+
+export interface ConversationSummary {
+  id: string
+  title: string
+  created_at: number
+}
+
 export interface ToolCallPayload {
   tool: string
   args: Record<string, unknown>
@@ -70,9 +92,12 @@ export interface AuthUser {
 }
 
 export interface OpenUIApi {
+  // Window
   hide: () => void
   quit: () => void
-  chat: (message: string, tier: 'free' | 'pro' | 'enterprise') => Promise<void>
+
+  // Chat
+  chat: (message: string, tier: Tier) => Promise<void>
   clearHistory: () => void
   onChunk: (cb: (chunk: string) => void) => () => void
   onToolCall: (cb: (tool: ToolCallPayload) => void) => () => void
@@ -80,11 +105,13 @@ export interface OpenUIApi {
   onError: (cb: (error: string) => void) => () => void
   onTask: (cb: (task: TaskUpdatePayload) => void) => () => void
   onTaskReset: (cb: () => void) => () => void
-  transcribeAndChat: (audio: ArrayBuffer, mimeType: string, tier: 'free' | 'pro' | 'enterprise') => Promise<void>
+
+  // Voice
+  transcribeAndChat: (audio: ArrayBuffer, mimeType: string, tier: Tier) => Promise<void>
   onTranscript: (cb: (text: string) => void) => () => void
-  // Permission prompts — fired by main when a tool detects a missing OS permission.
+
+  // OS Permissions
   onPermissionDenied: (cb: (permission: PermissionTarget) => void) => () => void
-  // Ask main to open the System Settings pane for the given permission.
   openSettings: (permission: PermissionTarget) => void
   // Phase 8 — Autonomous Coding Mode.
   setAutonomousEnabled: (enabled: boolean, tier?: 'free' | 'pro' | 'enterprise', source?: TaskSource) => void
@@ -114,6 +141,11 @@ export interface OpenUIApi {
   onTierChanged: (cb: (tier: 'free' | 'pro' | 'enterprise') => void) => () => void
   onPaymentSuccess: (cb: () => void) => () => void
   onPaymentCancelled: (cb: () => void) => () => void
+  // Tier upgrade notifications.
+  onTierUpgradeNeeded: (cb: (payload: TierUpgradePayload) => void) => () => void
+  // Conversation history.
+  getConversations: () => Promise<ConversationSummary[]>
+  loadConversation: (id: string) => Promise<Array<{ role: string; content: string; created_at: number }>>
 }
 
 declare global {

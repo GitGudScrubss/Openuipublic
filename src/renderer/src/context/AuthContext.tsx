@@ -1,0 +1,60 @@
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import type { User, Tier, TierUpgradePayload } from '../env'
+import TierUpgradeModal from '../components/TierUpgradeModal'
+
+interface AuthContextValue {
+  user: User | null
+  tier: Tier
+  isAnonymous: boolean
+}
+
+const AuthContext = createContext<AuthContextValue>({
+  user: null,
+  tier: 'free',
+  isAnonymous: true
+})
+
+export function AuthProvider({ children }: { children: ReactNode }): JSX.Element {
+  const [user, setUser] = useState<User | null>(null)
+  const [upgradePayload, setUpgradePayload] = useState<TierUpgradePayload | null>(null)
+
+  useEffect(() => {
+    // Fetch the current user state from main on mount.
+    // getUser returns AuthUser (display_name); map to our User shape.
+    window.openui.getUser().then((u) => {
+      if (u) setUser({ id: u.id, email: u.email, name: u.display_name, avatar_url: u.avatar_url, tier: (u.tier as Tier) ?? 'free' })
+    })
+
+    const unsubs = [
+      window.openui.onAuthSuccess((u) => {
+        setUser({ id: u.id, email: u.email, name: u.display_name, avatar_url: u.avatar_url, tier: (u.tier as Tier) ?? 'free' })
+      }),
+      window.openui.onAuthLogout(() => setUser(null)),
+      window.openui.onTierChanged((tier) => {
+        setUser((prev) => (prev ? { ...prev, tier } : prev))
+      }),
+      window.openui.onTierUpgradeNeeded((payload) => setUpgradePayload(payload))
+    ]
+
+    return () => unsubs.forEach((fn) => fn())
+  }, [])
+
+  const tier: Tier = user?.tier ?? 'free'
+  const isAnonymous = !user || user.id === 'anonymous'
+
+  return (
+    <AuthContext.Provider value={{ user, tier, isAnonymous }}>
+      {children}
+      {upgradePayload && (
+        <TierUpgradeModal
+          payload={upgradePayload}
+          onDismiss={() => setUpgradePayload(null)}
+        />
+      )}
+    </AuthContext.Provider>
+  )
+}
+
+export function useAuth(): AuthContextValue {
+  return useContext(AuthContext)
+}
