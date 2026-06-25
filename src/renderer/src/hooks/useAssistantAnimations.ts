@@ -30,11 +30,14 @@ const RING_CFG = [
 export function useAssistantAnimations(
   scopeRef: RefObject<HTMLElement>,
   recordingRef?: MutableRefObject<boolean>,
-  captionLockedRef?: MutableRefObject<boolean>
+  captionLockedRef?: MutableRefObject<boolean>,
+  // Gates the entrance choreography so it only runs once the chat UI is in the
+  // DOM (e.g. after onboarding finishes), not while the wizard/loader is shown.
+  enabled = true
 ): void {
   useEffect(() => {
     const scope = scopeRef.current
-    if (!scope) return
+    if (!scope || !enabled) return
 
     let barTimer: number | null = null
     let typeTimer: number | null = null
@@ -127,5 +130,5 @@ export function useAssistantAnimations(
       gsap.killTweensOf(scope.querySelectorAll('.sbar'))
       ctx.revert()
     }
-  }, [scopeRef])
+  }, [scopeRef, enabled])
 }

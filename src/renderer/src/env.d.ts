@@ -146,6 +146,9 @@ export interface OpenUIApi {
   // Conversation history.
   getConversations: () => Promise<ConversationSummary[]>
   loadConversation: (id: string) => Promise<Array<{ role: string; content: string; created_at: number }>>
+  // App settings (key/value persisted in SQLite).
+  getSetting: (key: string) => Promise<unknown>
+  setSetting: (key: string, value: unknown) => Promise<void>
 }
 
 declare global {

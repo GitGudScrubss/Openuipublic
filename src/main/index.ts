@@ -7,7 +7,7 @@ import { startScheduler } from './scheduler'
 import { openSettingsPane, type PermissionTarget } from './permissions'
 import { registerStripeIPC, isPaymentFlowWebContents } from './stripe/checkout'
 import { closeBrowser } from './tools'
-import { initDatabase } from './database'
+import { initDatabase, database } from './database'
 import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
 import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
 import { logout, getCurrentUser, getUserTier, startTokenRefreshLoop, stopTokenRefreshLoop } from './auth/sessionManager'
@@ -271,6 +271,18 @@ app.whenReady().then(() => {
   ipcMain.handle('openui:get-user', () => getCurrentUser())
   // Cached subscription tier ('free' when unknown/expired).
   ipcMain.handle('openui:get-tier', () => getUserTier())
+
+  // ── App settings IPC (key/value in the SQLite settings table) ───────────────
+  // Used by onboarding (`onboarding_complete`) and any future persisted prefs.
+  // The key is validated to a string before hitting the DB; values round-trip
+  // as JSON via the settings repository.
+  ipcMain.handle('openui:get-setting', (_event, key: unknown) =>
+    typeof key === 'string' ? database.settings.getSetting(key) : null
+  )
+  ipcMain.handle('openui:set-setting', (_event, payload: unknown) => {
+    const { key, value } = (payload ?? {}) as { key?: unknown; value?: unknown }
+    if (typeof key === 'string') database.settings.setSetting(key, value)
+  })
 
   if (win) {
     registerAgentIPC(win)

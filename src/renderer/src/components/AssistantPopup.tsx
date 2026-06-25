@@ -3,6 +3,7 @@ import type { PermissionTarget } from '../env'
 import { useAuth } from '../context/AuthContext'
 import AuthButton from './AuthButton'
 import SubscriptionStatus from './SubscriptionStatus'
+import SignInBanner from './SignInBanner'
 
 type VoiceState = 'idle' | 'recording' | 'transcribing' | 'processing' | 'done'
 
@@ -11,6 +12,11 @@ interface Props {
   captionLockedRef: MutableRefObject<boolean>
   /** Called when an OS permission is missing; triggers the PermissionModal in App. */
   onPermissionNeeded?: (permission: PermissionTarget) => void
+  /**
+   * First message handed over from onboarding. Sent once on mount so its
+   * streamed reply lands here, making the wizard-to-chat hand-off seamless.
+   */
+  initialMessage?: string | null
 }
 
 /** Prefer opus/webm; fall back to whatever the browser supports. */
@@ -19,11 +25,17 @@ function pickMimeType(): string {
   return candidates.find((t) => MediaRecorder.isTypeSupported(t)) ?? ''
 }
 
-export default function AssistantPopup({ recordingRef, captionLockedRef, onPermissionNeeded }: Props): JSX.Element {
+export default function AssistantPopup({
+  recordingRef,
+  captionLockedRef,
+  onPermissionNeeded,
+  initialMessage
+}: Props): JSX.Element {
   const { tier } = useAuth()
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [transcript, setTranscript] = useState<string | null>(null)
   const [inputText, setInputText] = useState('')
+  const initialSentRef = useRef(false)
 
   // Imperative refs — caption and bars are managed outside React state so
   // GSAP and rAF writes don't conflict with React's reconciler.
@@ -223,6 +235,15 @@ export default function AssistantPopup({ recordingRef, captionLockedRef, onPermi
     [voiceState, captionLockedRef, setCaption]
   )
 
+  // Fire the message handed over from onboarding exactly once, after the IPC
+  // listeners above are wired so the streamed reply is captured here.
+  useEffect(() => {
+    if (initialMessage && !initialSentRef.current) {
+      initialSentRef.current = true
+      void handleSend(initialMessage)
+    }
+  }, [initialMessage, handleSend])
+
   const isRecording = voiceState === 'recording'
   const isBusy = voiceState === 'transcribing' || voiceState === 'processing'
 
@@ -243,6 +264,9 @@ export default function AssistantPopup({ recordingRef, captionLockedRef, onPermi
           <AuthButton />
         </div>
       </div>
+
+      {/* Returning-but-signed-out prompt (hidden while signed in) */}
+      <SignInBanner />
 
       {/* Mic stage */}
       <div className="mic-stage">
