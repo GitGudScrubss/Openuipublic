@@ -16,6 +16,7 @@ import { initTelemetry, enableTelemetryAfterConsent, shutdownTelemetry, setTelem
 import { grantConsent, denyConsent, getConsentStatus, recordPendingEvent, ConsentStatus } from './telemetry/consent'
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdateAndRestart, openReleasesPage } from './updater/updater'
 import { Events } from './telemetry/events'
+import { exportWorkflow, importWorkflow, getWorkflows, deleteWorkflow, type Workflow } from './workflows'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -331,6 +332,23 @@ app.whenReady().then(async () => {
     if (typeof key === 'string') database.settings.setSetting(key, value)
   })
 
+
+  // ── Workflow IPC ─────────────────────────────────────────────────────────────
+  ipcMain.handle('openui:workflow:list', () => getWorkflows())
+
+  ipcMain.handle('openui:workflow:export', async (_event, payload: unknown) => {
+    const { workflow } = (payload ?? {}) as { workflow?: Workflow }
+    if (!workflow || typeof workflow !== 'object') return { ok: false, error: 'Invalid workflow payload.' }
+    return exportWorkflow(workflow)
+  })
+
+  ipcMain.handle('openui:workflow:import', () => importWorkflow())
+
+  ipcMain.handle('openui:workflow:delete', async (_event, payload: unknown) => {
+    const { name } = (payload ?? {}) as { name?: unknown }
+    if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'Invalid workflow name.' }
+    return deleteWorkflow(name)
+  })
 
   if (win) {
     registerAgentIPC(win)

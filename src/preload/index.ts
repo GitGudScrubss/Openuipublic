@@ -54,6 +54,11 @@ type WaitlistResult =
   | { ok: true; alreadySubscribed?: boolean }
   | { ok: false; error: string }
 
+type WorkflowStep = { tool: string; args: Record<string, unknown> }
+type Workflow = { name: string; description: string; trigger: string; steps: WorkflowStep[] }
+type WorkflowResult = { ok: boolean; error?: string }
+type WorkflowImportResult = { ok: boolean; workflow?: Workflow; error?: string }
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const wrap = <T>(cb: (data: T) => void): IpcListener => ((_: any, data: T) => cb(data)) as IpcListener
 
@@ -329,7 +334,20 @@ const api = {
   // ── App settings (key/value persisted in the SQLite settings table) ─────────
   getSetting: (key: string): Promise<unknown> => ipcRenderer.invoke('openui:get-setting', key),
   setSetting: (key: string, value: unknown): Promise<void> =>
-    ipcRenderer.invoke('openui:set-setting', { key, value })
+    ipcRenderer.invoke('openui:set-setting', { key, value }),
+
+  // ── Team / Shared Workflows ───────────────────────────────────────────────────
+  listWorkflows: (): Promise<Workflow[]> =>
+    ipcRenderer.invoke('openui:workflow:list'),
+
+  exportWorkflow: (workflow: Workflow): Promise<WorkflowResult> =>
+    ipcRenderer.invoke('openui:workflow:export', { workflow }),
+
+  importWorkflow: (): Promise<WorkflowImportResult> =>
+    ipcRenderer.invoke('openui:workflow:import'),
+
+  deleteWorkflow: (name: string): Promise<WorkflowResult> =>
+    ipcRenderer.invoke('openui:workflow:delete', { name })
 }
 
 export type OpenUIApi = typeof api

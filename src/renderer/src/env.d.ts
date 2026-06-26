@@ -125,6 +125,23 @@ export type WaitlistResult =
   | { ok: true; alreadySubscribed?: boolean }
   | { ok: false; error: string }
 
+// ── Team / Shared Workflows ───────────────────────────────────────────────────
+
+export interface WorkflowStep {
+  tool: string
+  args: Record<string, unknown>
+}
+
+export interface Workflow {
+  name: string
+  description: string
+  trigger: string
+  steps: WorkflowStep[]
+}
+
+export type WorkflowResult = { ok: boolean; error?: string }
+export type WorkflowImportResult = { ok: boolean; workflow?: Workflow; error?: string }
+
 export interface OpenUIApi {
   // Window
   hide: () => void
@@ -206,6 +223,11 @@ export interface OpenUIApi {
   // App settings (key/value persisted in SQLite).
   getSetting: (key: string) => Promise<unknown>
   setSetting: (key: string, value: unknown) => Promise<void>
+  // Team / Shared Workflows.
+  listWorkflows: () => Promise<Workflow[]>
+  exportWorkflow: (workflow: Workflow) => Promise<WorkflowResult>
+  importWorkflow: () => Promise<WorkflowImportResult>
+  deleteWorkflow: (name: string) => Promise<WorkflowResult>
 }
 
 declare global {
