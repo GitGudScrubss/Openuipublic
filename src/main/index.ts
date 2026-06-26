@@ -8,6 +8,7 @@ import { openSettingsPane, type PermissionTarget } from './permissions'
 import { registerStripeIPC, isPaymentFlowWebContents } from './stripe/checkout'
 import { registerWaitlistIPC } from './waitlist'
 import { closeBrowser } from './tools'
+import { connectMcpServer, disconnectAll, type McpServerConfig } from './mcp-client'
 import { initDatabase, database } from './database'
 import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
 import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
@@ -16,9 +17,38 @@ import { initTelemetry, enableTelemetryAfterConsent, shutdownTelemetry, setTelem
 import { grantConsent, denyConsent, getConsentStatus, recordPendingEvent, ConsentStatus } from './telemetry/consent'
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdateAndRestart, openReleasesPage } from './updater/updater'
 import { Events } from './telemetry/events'
+import { exportWorkflow, importWorkflow, getWorkflows, deleteWorkflow, type Workflow } from './workflows'
+import { indexDirectory } from './rag'
+import {
+  isOllamaInstalled,
+  isOllamaRunning,
+  startOllama,
+  pullModel,
+  getOllamaInstallUrl,
+  dismissOllamaPrompt
+} from './local/ollamaManager'
+import {
+  startRecording,
+  stopRecording,
+  playRecording,
+  recordClickAction,
+  recordKeypressAction,
+  loadMacros,
+  saveMacro,
+  deleteMacro,
+  isRecording,
+  type RecorderAction,
+} from './recorder'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
+
+// Timestamp of the on-launch reveal. The blur→hide behaviour is suppressed for
+// a short grace window afterwards so the freshly launched overlay can't vanish
+// before the user has even seen it (e.g. a transient focus change during
+// startup, or Windows foreground-stealing prevention not focusing it cleanly).
+let launchRevealedAt = 0
+const AUTO_HIDE_GRACE_MS = 2500
 
 const isDev = !app.isPackaged
 
@@ -174,6 +204,12 @@ function createWindow(): void {
   // usable during development. Never hide while the OAuth window is open: it is
   // a child of this overlay, so hiding the parent would hide the sign-in window.
   win.on('blur', () => {
+    // Don't dismiss the window in the grace window right after the launch
+    // reveal, nor while first-run onboarding is still in progress — otherwise a
+    // transient focus change hides the freshly opened window before the user
+    // has finished setting up, making the app look like it never opened.
+    if (launchRevealedAt !== 0 && Date.now() - launchRevealedAt < AUTO_HIDE_GRACE_MS) return
+    if (!isOnboardingComplete()) return
     if (app.isPackaged && win && !win.webContents.isDevToolsOpened() && !isAuthWindowOpen()) hideWindow()
   })
 
@@ -186,12 +222,47 @@ function showWindow(): void {
   if (!win) return
   const { x, y, width, height } = overlayBounds()
   win.setBounds({ x, y, width, height })
+  // Re-assert always-on-top and raise to the top before showing. A frameless,
+  // transparent, always-on-top overlay can otherwise fail to surface above the
+  // foreground window on some Windows setups — show() alone is not always
+  // enough to make a topmost layered window actually appear.
+  win.setAlwaysOnTop(true, 'screen-saver')
   win.show()
+  win.moveTop()
   win.focus()
+}
+
+/**
+ * Reveal the overlay once on launch. Bound to both 'ready-to-show' and
+ * 'did-finish-load' (whichever fires first wins); the `launchRevealedAt` guard
+ * makes the second call a no-op. Records the reveal time so the blur→hide
+ * handler leaves a short grace period before it can dismiss the window — without
+ * this an installed app could appear to "not open" because its window flashed
+ * up and was hidden again on the first stray focus change.
+ */
+function revealWindow(): void {
+  if (launchRevealedAt !== 0) return
+  launchRevealedAt = Date.now()
+  showWindow()
 }
 
 function hideWindow(): void {
   win?.hide()
+}
+
+/**
+ * Whether first-run onboarding has been completed, read straight from the
+ * SQLite settings the main process owns. Used to keep the overlay pinned open
+ * during onboarding (see the blur handler). Fails closed (treats onboarding as
+ * incomplete) if the DB is unavailable, which keeps the window visible in the
+ * degraded state where the user most needs to see something.
+ */
+function isOnboardingComplete(): boolean {
+  try {
+    return database.settings.getSetting('onboarding_complete') === true
+  } catch {
+    return false
+  }
 }
 
 function toggleWindow(): void {
@@ -233,8 +304,21 @@ function createTray(): void {
 registerDeepLinkProtocol()
 
 app.whenReady().then(async () => {
-  initDatabase()
-  await initTelemetry()
+  // Startup init is guarded so a failure in any single subsystem (for example
+  // the native better-sqlite3 module failing to load on a freshly installed
+  // machine) cannot abort the whole launch and leave the user staring at an
+  // app that "opened" but shows nothing. Each guard logs and continues so the
+  // window is still created and revealed below.
+  try {
+    initDatabase()
+  } catch (err) {
+    console.error('[openui] Database initialisation failed:', err)
+  }
+  try {
+    await initTelemetry()
+  } catch (err) {
+    console.error('[openui] Telemetry initialisation failed:', err)
+  }
 
   // True menu-bar app: no Dock icon on macOS.
   if (process.platform === 'darwin') app.dock?.hide()
@@ -244,6 +328,20 @@ app.whenReady().then(async () => {
 
   createWindow()
   createTray()
+
+  // Reveal the overlay as soon as it has painted so OpenUI is visibly "open"
+  // the instant it launches (first run shows the onboarding wizard, later runs
+  // show the assistant). The window is created hidden (show: false) only to
+  // avoid a flash of unpainted content — WITHOUT this reveal it would never
+  // appear unless the user happened to click the system-tray icon, which makes
+  // a freshly installed app look like it failed to open entirely. 'ready-to-show'
+  // is the no-flash path; 'did-finish-load' is a fallback in case it doesn't
+  // fire for the transparent window. showWindow() is idempotent, so the
+  // duplicate call is harmless.
+  if (win) {
+    win.once('ready-to-show', () => revealWindow())
+    win.webContents.once('did-finish-load', () => revealWindow())
+  }
 
   // Route deep links to the main window and keep the access token fresh.
   setupDeepLinkHandlers(win)
@@ -331,6 +429,103 @@ app.whenReady().then(async () => {
     if (typeof key === 'string') database.settings.setSetting(key, value)
   })
 
+  // ── Local RAG knowledge base ──────────────────────────────────────────────
+  // Index a local directory of .txt/.pdf files and store embeddings in the
+  // user-data folder.  Embeddings are generated by Ollama (nomic-embed-text)
+  // so no document content is sent to the cloud.
+  // Resolves to { indexed, chunks, error? }.
+  ipcMain.handle('openui:rag:index', async (_event, payload: unknown) => {
+    const { dirPath } = (payload ?? {}) as { dirPath?: unknown }
+    if (typeof dirPath !== 'string' || !dirPath.trim()) {
+      return { indexed: 0, chunks: 0, error: 'openui:rag:index requires a "dirPath" string.' }
+    }
+    return indexDirectory(dirPath.trim())
+  })
+
+  // ── Local AI / Ollama IPC ───────────────────────────────────────────────────
+  // Returns current Ollama installation and running state.
+  ipcMain.handle('openui:check-ollama', async () => {
+    const [installed, running] = await Promise.all([isOllamaInstalled(), isOllamaRunning()])
+    return { installed, running }
+  })
+
+  // Opens the official Ollama download page in the OS default browser.
+  // We deliberately never auto-install — the user must opt in.
+  ipcMain.handle('openui:install-ollama', () => {
+    void shell.openExternal(getOllamaInstallUrl())
+  })
+
+  // Attempts to start a locally-installed Ollama daemon (ollama serve).
+  ipcMain.handle('openui:start-ollama', () => startOllama())
+
+  // Records a dismiss action in settings; permanently=true suppresses future prompts.
+  ipcMain.handle('openui:dismiss-ollama-prompt', (_event, payload: unknown) => {
+    const permanent =
+      typeof payload === 'object' && payload !== null && 'permanent' in payload
+        ? Boolean((payload as Record<string, unknown>).permanent)
+        : false
+    return dismissOllamaPrompt(permanent)
+  })
+
+  // Pulls a named model via `ollama pull <modelName>`.
+  ipcMain.handle('openui:pull-model', (_event, payload: unknown) => {
+    const modelName =
+      typeof payload === 'object' && payload !== null && 'modelName' in payload
+        ? String((payload as Record<string, unknown>).modelName)
+        : 'llama3:8b'
+    return pullModel(modelName)
+  })
+
+  // ── Action Recorder / Macros IPC ───────────────────────────────────────────
+  ipcMain.handle('openui:recorder:start', () => startRecording())
+
+  ipcMain.handle('openui:recorder:stop', () => stopRecording())
+
+  ipcMain.handle('openui:recorder:play', (_e, payload: unknown) => {
+    const { actions } = payload as { actions: RecorderAction[] }
+    return playRecording(actions)
+  })
+
+  ipcMain.handle('openui:recorder:record-click', (_e, payload: unknown) => {
+    const { x, y, button } = payload as { x: number; y: number; button?: 'left' | 'right' }
+    recordClickAction(x, y, button)
+  })
+
+  ipcMain.handle('openui:recorder:record-keypress', (_e, payload: unknown) => {
+    const { text } = payload as { text: string }
+    recordKeypressAction(text)
+  })
+
+  ipcMain.handle('openui:recorder:get-macros', () => loadMacros())
+
+  ipcMain.handle('openui:recorder:save-macro', (_e, payload: unknown) => {
+    const { name, actions } = payload as { name: string; actions: RecorderAction[] }
+    return saveMacro(name, actions)
+  })
+
+  ipcMain.handle('openui:recorder:delete-macro', (_e, payload: unknown) => {
+    const { name } = payload as { name: string }
+    return deleteMacro(name)
+  })
+
+  ipcMain.handle('openui:recorder:is-recording', () => isRecording())
+
+  // ── Workflow IPC ─────────────────────────────────────────────────────────────
+  ipcMain.handle('openui:workflow:list', () => getWorkflows())
+
+  ipcMain.handle('openui:workflow:export', async (_event, payload: unknown) => {
+    const { workflow } = (payload ?? {}) as { workflow?: Workflow }
+    if (!workflow || typeof workflow !== 'object') return { ok: false, error: 'Invalid workflow payload.' }
+    return exportWorkflow(workflow)
+  })
+
+  ipcMain.handle('openui:workflow:import', () => importWorkflow())
+
+  ipcMain.handle('openui:workflow:delete', async (_event, payload: unknown) => {
+    const { name } = (payload ?? {}) as { name?: unknown }
+    if (typeof name !== 'string' || !name.trim()) return { ok: false, error: 'Invalid workflow name.' }
+    return deleteWorkflow(name)
+  })
 
   if (win) {
     registerAgentIPC(win)
@@ -351,7 +546,12 @@ app.whenReady().then(async () => {
   })
 })
 
+ipcMain.handle('openui:mcp:connect', async (_event, config: unknown) => {
+  return connectMcpServer(config as McpServerConfig)
+})
+
 app.on('before-quit', () => {
+  disconnectAll()
   trackEvent(Events.APP_CLOSED)
   shutdownTelemetry()
 })

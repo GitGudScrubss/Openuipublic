@@ -73,6 +73,15 @@ export interface TaskUpdatePayload {
   detail?: string
 }
 
+/** Payload emitted when the agent loop needs user approval before running a tool. */
+export interface HitlRequestPayload {
+  id: string
+  tool: string
+  args: Record<string, unknown>
+  /** Human-readable label from describeToolCall, e.g. "Open Safari" */
+  label: string
+}
+
 /** Where the autonomous agent pulls its tasks from. */
 export type TaskSource = 'todo' | 'github'
 
@@ -124,6 +133,23 @@ export interface AuthUser {
 export type WaitlistResult =
   | { ok: true; alreadySubscribed?: boolean }
   | { ok: false; error: string }
+
+// ── Team / Shared Workflows ───────────────────────────────────────────────────
+
+export interface WorkflowStep {
+  tool: string
+  args: Record<string, unknown>
+}
+
+export interface Workflow {
+  name: string
+  description: string
+  trigger: string
+  steps: WorkflowStep[]
+}
+
+export type WorkflowResult = { ok: boolean; error?: string }
+export type WorkflowImportResult = { ok: boolean; workflow?: Workflow; error?: string }
 
 export interface OpenUIApi {
   // Window
@@ -206,9 +232,42 @@ export interface OpenUIApi {
   // App settings (key/value persisted in SQLite).
   getSetting: (key: string) => Promise<unknown>
   setSetting: (key: string, value: unknown) => Promise<void>
+  // Team / Shared Workflows.
+  listWorkflows: () => Promise<Workflow[]>
+  exportWorkflow: (workflow: Workflow) => Promise<WorkflowResult>
+  importWorkflow: () => Promise<WorkflowImportResult>
+  deleteWorkflow: (name: string) => Promise<WorkflowResult>
+  // HITL (Human-in-the-Loop) confirmation.
+  onHitlRequest: (cb: (payload: HitlRequestPayload) => void) => () => void
+  respondHitl: (id: string, approved: boolean) => void
+  // Local AI / Ollama.
+  checkOllama: () => Promise<{ installed: boolean; running: boolean }>
+  installOllama: () => Promise<void>
+  startOllama: () => Promise<boolean>
+  dismissOllamaPrompt: (permanent: boolean) => Promise<void>
+  pullModel: (modelName: string) => Promise<boolean>
+  onLocalAIAvailable: (cb: () => void) => () => void
+  // Action Recorder / Macros.
+  recorderStart: () => Promise<void>
+  recorderStop: () => Promise<RecorderAction[]>
+  recorderPlay: (actions: RecorderAction[]) => Promise<void>
+  recorderRecordClick: (x: number, y: number, button?: 'left' | 'right') => Promise<void>
+  recorderRecordKeypress: (text: string) => Promise<void>
+  recorderGetMacros: () => Promise<RecorderMacro[]>
+  recorderSaveMacro: (name: string, actions: RecorderAction[]) => Promise<RecorderMacro>
+  recorderDeleteMacro: (name: string) => Promise<boolean>
+  recorderIsRecording: () => Promise<boolean>
 }
 
 declare global {
+  type RecorderAction =
+    | { type: 'mousemove'; x: number; y: number; window: string; timestamp: number }
+    | { type: 'mouseclick'; x: number; y: number; button: 'left' | 'right'; window: string; timestamp: number }
+    | { type: 'keypress'; text: string; timestamp: number }
+    | { type: 'delay'; ms: number; timestamp: number }
+
+  type RecorderMacro = { name: string; actions: RecorderAction[]; createdAt: string }
+
   interface Window {
     openui: OpenUIApi
   }
