@@ -1217,3 +1217,53 @@ npm install   # picks up @octokit/rest
 GITHUB_TOKEN=ghp_…    # repo read + write:discussion scope
 GITHUB_REPO=owner/repo  # optional default repo
 ```
+
+---
+
+## 18. Action Recorder & Macros
+
+The Action Recorder lets users record mouse movements, clicks, and keyboard input and replay them as named macros.
+
+### Architecture
+
+| Layer | File | Responsibility |
+|-------|------|----------------|
+| Main | `src/main/recorder.ts` | State machine, mouse polling, nut-js playback, JSON persistence |
+| IPC | `src/main/index.ts` | 9 `ipcMain.handle` channels under `openui:recorder:*` |
+| Preload | `src/preload/index.ts` | Exposes recorder API on `window.openui` via `contextBridge` |
+| Renderer | `src/renderer/src/components/RecorderUI.tsx` | React UI with recording indicator and macro list |
+
+### Recording
+
+`@nut-tree-fork/nut-js` v4 is an output-only library (no global input event hooks). Recording is therefore implemented via polling:
+
+- `mouse.getPosition()` is called every 50 ms inside `startRecording()`.
+- Position changes above an 8-pixel threshold produce a `mousemove` action.
+- `screen.getActiveWindow()` attaches the foreground window title to each event.
+- Click and keypress actions can be injected at any time via `recorderRecordClick()` / `recorderRecordKeypress()` (called from the UI).
+
+### IPC Channels
+
+| Channel | Direction | Description |
+|---------|-----------|-------------|
+| `openui:recorder:start` | invoke | Begin polling and reset action buffer |
+| `openui:recorder:stop` | invoke | Stop polling; return captured `RecorderAction[]` |
+| `openui:recorder:play` | invoke | Replay an action array via nut-js |
+| `openui:recorder:record-click` | invoke | Inject a click at `(x, y)` into the current recording |
+| `openui:recorder:record-keypress` | invoke | Inject a text-type event into the current recording |
+| `openui:recorder:get-macros` | invoke | Load all macros from `macros.json` |
+| `openui:recorder:save-macro` | invoke | Persist a named macro to `macros.json` |
+| `openui:recorder:delete-macro` | invoke | Remove a named macro from `macros.json` |
+| `openui:recorder:is-recording` | invoke | Query recording state |
+
+### Persistence
+
+Macros are stored in `{userData}/macros.json` as a JSON array of `Macro` objects. Writes are synchronous (no SQLite — intentionally standalone).
+
+### Playback
+
+`playRecording(actions)` replays actions in order using nut-js:
+- `mousemove` → `mouse.setPosition()`
+- `mouseclick` → `mouse.setPosition()` + `mouse.click(Button.LEFT|RIGHT)`
+- `keypress` → `keyboard.type(text)`
+- Inter-action timing is replayed from recorded `timestamp` offsets, clamped to 2 s per gap.

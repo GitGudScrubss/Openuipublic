@@ -213,9 +213,27 @@ export interface OpenUIApi {
   dismissOllamaPrompt: (permanent: boolean) => Promise<void>
   pullModel: (modelName: string) => Promise<boolean>
   onLocalAIAvailable: (cb: () => void) => () => void
+  // Action Recorder / Macros.
+  recorderStart: () => Promise<void>
+  recorderStop: () => Promise<RecorderAction[]>
+  recorderPlay: (actions: RecorderAction[]) => Promise<void>
+  recorderRecordClick: (x: number, y: number, button?: 'left' | 'right') => Promise<void>
+  recorderRecordKeypress: (text: string) => Promise<void>
+  recorderGetMacros: () => Promise<RecorderMacro[]>
+  recorderSaveMacro: (name: string, actions: RecorderAction[]) => Promise<RecorderMacro>
+  recorderDeleteMacro: (name: string) => Promise<boolean>
+  recorderIsRecording: () => Promise<boolean>
 }
 
 declare global {
+  type RecorderAction =
+    | { type: 'mousemove'; x: number; y: number; window: string; timestamp: number }
+    | { type: 'mouseclick'; x: number; y: number; button: 'left' | 'right'; window: string; timestamp: number }
+    | { type: 'keypress'; text: string; timestamp: number }
+    | { type: 'delay'; ms: number; timestamp: number }
+
+  type RecorderMacro = { name: string; actions: RecorderAction[]; createdAt: string }
+
   interface Window {
     openui: OpenUIApi
   }

@@ -24,6 +24,18 @@ import {
   getOllamaInstallUrl,
   dismissOllamaPrompt
 } from './local/ollamaManager'
+import {
+  startRecording,
+  stopRecording,
+  playRecording,
+  recordClickAction,
+  recordKeypressAction,
+  loadMacros,
+  saveMacro,
+  deleteMacro,
+  isRecording,
+  type RecorderAction,
+} from './recorder'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -372,6 +384,40 @@ app.whenReady().then(async () => {
         : 'llama3:8b'
     return pullModel(modelName)
   })
+
+  // ── Action Recorder / Macros IPC ───────────────────────────────────────────
+  ipcMain.handle('openui:recorder:start', () => startRecording())
+
+  ipcMain.handle('openui:recorder:stop', () => stopRecording())
+
+  ipcMain.handle('openui:recorder:play', (_e, payload: unknown) => {
+    const { actions } = payload as { actions: RecorderAction[] }
+    return playRecording(actions)
+  })
+
+  ipcMain.handle('openui:recorder:record-click', (_e, payload: unknown) => {
+    const { x, y, button } = payload as { x: number; y: number; button?: 'left' | 'right' }
+    recordClickAction(x, y, button)
+  })
+
+  ipcMain.handle('openui:recorder:record-keypress', (_e, payload: unknown) => {
+    const { text } = payload as { text: string }
+    recordKeypressAction(text)
+  })
+
+  ipcMain.handle('openui:recorder:get-macros', () => loadMacros())
+
+  ipcMain.handle('openui:recorder:save-macro', (_e, payload: unknown) => {
+    const { name, actions } = payload as { name: string; actions: RecorderAction[] }
+    return saveMacro(name, actions)
+  })
+
+  ipcMain.handle('openui:recorder:delete-macro', (_e, payload: unknown) => {
+    const { name } = payload as { name: string }
+    return deleteMacro(name)
+  })
+
+  ipcMain.handle('openui:recorder:is-recording', () => isRecording())
 
   if (win) {
     registerAgentIPC(win)

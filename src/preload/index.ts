@@ -7,6 +7,14 @@ type TaskSource = 'todo' | 'github'
 type InterviewState = 'idle' | 'asking' | 'listening' | 'evaluating' | 'complete'
 type IpcListener = Parameters<typeof ipcRenderer.on>[1]
 
+type RecorderAction =
+  | { type: 'mousemove'; x: number; y: number; window: string; timestamp: number }
+  | { type: 'mouseclick'; x: number; y: number; button: 'left' | 'right'; window: string; timestamp: number }
+  | { type: 'keypress'; text: string; timestamp: number }
+  | { type: 'delay'; ms: number; timestamp: number }
+
+type RecorderMacro = { name: string; actions: RecorderAction[]; createdAt: string }
+
 /** Signed-in user profile pushed/returned by the main auth layer. */
 type AuthUser = {
   id: string
@@ -352,7 +360,35 @@ const api = {
     const fn = (() => cb()) as IpcListener
     ipcRenderer.on('openui:local-ai-available', fn)
     return (): void => { ipcRenderer.removeListener('openui:local-ai-available', fn) }
-  }
+  },
+
+  // ── Action Recorder / Macros ───────────────────────────────────────────────
+  recorderStart: (): Promise<void> =>
+    ipcRenderer.invoke('openui:recorder:start'),
+
+  recorderStop: (): Promise<RecorderAction[]> =>
+    ipcRenderer.invoke('openui:recorder:stop'),
+
+  recorderPlay: (actions: RecorderAction[]): Promise<void> =>
+    ipcRenderer.invoke('openui:recorder:play', { actions }),
+
+  recorderRecordClick: (x: number, y: number, button?: 'left' | 'right'): Promise<void> =>
+    ipcRenderer.invoke('openui:recorder:record-click', { x, y, button }),
+
+  recorderRecordKeypress: (text: string): Promise<void> =>
+    ipcRenderer.invoke('openui:recorder:record-keypress', { text }),
+
+  recorderGetMacros: (): Promise<RecorderMacro[]> =>
+    ipcRenderer.invoke('openui:recorder:get-macros'),
+
+  recorderSaveMacro: (name: string, actions: RecorderAction[]): Promise<RecorderMacro> =>
+    ipcRenderer.invoke('openui:recorder:save-macro', { name, actions }),
+
+  recorderDeleteMacro: (name: string): Promise<boolean> =>
+    ipcRenderer.invoke('openui:recorder:delete-macro', { name }),
+
+  recorderIsRecording: (): Promise<boolean> =>
+    ipcRenderer.invoke('openui:recorder:is-recording'),
 }
 
 export type OpenUIApi = typeof api
