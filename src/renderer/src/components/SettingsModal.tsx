@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { ConsentStatus } from '../env'
+import type { UpdateStatus } from '../hooks/useUpdater'
 
 interface Props {
   onClose: () => void
+  appVersion?: string
+  updateStatus?: UpdateStatus
+  onCheckForUpdates?: () => void
 }
 
 /**
@@ -13,7 +17,7 @@ interface Props {
  * PostHog down). The toggle stays in sync with changes made elsewhere via the
  * onConsentUpdated event.
  */
-export default function SettingsModal({ onClose }: Props): JSX.Element {
+export default function SettingsModal({ onClose, appVersion, updateStatus, onCheckForUpdates }: Props): JSX.Element {
   const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
 
@@ -119,6 +123,52 @@ export default function SettingsModal({ onClose }: Props): JSX.Element {
             </div>
           </div>
           <Switch on={enabled} disabled={busy} onClick={() => void toggle()} />
+        </div>
+
+        {/* App version & update check */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            borderTop: '1px solid rgba(0,0,0,0.06)',
+            paddingTop: 14,
+            marginTop: 14,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#1c1c1e' }}>App Version</div>
+            <div style={{ fontSize: 12, color: '#8e8e93', marginTop: 2 }}>
+              OpenUI{appVersion ? ` v${appVersion}` : ''}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            {updateStatus === 'checking' ? (
+              <span style={{ fontSize: 11, color: '#8e8e93' }}>Checking…</span>
+            ) : updateStatus === 'latest' ? (
+              <span style={{ fontSize: 11, color: '#34c759', fontWeight: 500 }}>Up to date</span>
+            ) : updateStatus === 'available' || updateStatus === 'downloaded' ? (
+              <span style={{ fontSize: 11, color: '#0a84ff', fontWeight: 500 }}>
+                {updateStatus === 'downloaded' ? 'Ready to install' : 'Update available'}
+              </span>
+            ) : (
+              <button
+                style={{
+                  fontSize: 11,
+                  fontWeight: 500,
+                  color: '#0a84ff',
+                  background: 'none',
+                  border: 'none',
+                  cursor: onCheckForUpdates ? 'pointer' : 'default',
+                  padding: 0,
+                }}
+                onClick={onCheckForUpdates}
+                disabled={!onCheckForUpdates}
+              >
+                Check for updates
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

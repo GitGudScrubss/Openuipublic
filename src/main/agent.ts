@@ -2,7 +2,8 @@ import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { Ollama } from 'ollama'
 import { BrowserWindow, ipcMain } from 'electron'
-import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolResult, type Tier } from './tools'
+import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolResult, type PendingApprovalResult, type Tier } from './tools'
+import { getMcpToolSchemas, callMcpTool } from './mcp-client'
 import { database } from './database'
 import { clampTierToEntitlement } from './stripe/pricing'
 import { getCurrentUserId } from './stripe/subscriptionSync'
@@ -44,6 +45,28 @@ const MAX_TOOL_TURNS = 8
 
 let taskSeq = 0
 
+// ── HITL (Human-in-the-Loop) ──────────────────────────────────────────────────
+
+/** Resolvers keyed by request id, awaited while the renderer shows HitlModal. */
+const pendingHitlRequests = new Map<string, (approved: boolean) => void>()
+let hitlSeq = 0
+
+/**
+ * Emit a HITL request to the renderer and return a Promise that resolves once
+ * the user clicks Allow (true) or Deny (false) in the HitlModal.
+ */
+function waitForHitlApproval(
+  win: BrowserWindow,
+  tool: string,
+  args: Record<string, unknown>
+): Promise<boolean> {
+  const id = `hitl${++hitlSeq}`
+  return new Promise<boolean>((resolve) => {
+    pendingHitlRequests.set(id, resolve)
+    emit(win, 'openui:hitl:request', { id, tool, args, label: describeToolCall(tool, args) })
+  })
+}
+
 /** Render one tool schema as a compact signature line for the system prompt. */
 function renderSchema(schema: ToolSchema): string {
   const params = Object.entries(schema.parameters.properties)
@@ -56,7 +79,9 @@ function renderSchema(schema: ToolSchema): string {
   return `- ${schema.name}(${params}) — ${schema.description}`
 }
 
-const SYSTEM_PROMPT = `You are OpenUI, an intelligent desktop assistant running as a menu-bar app. You help users get things done on their computer through natural conversation.
+function buildSystemPrompt(): string {
+  const allSchemas: ToolSchema[] = [...toolSchemas, ...getMcpToolSchemas()]
+  return `You are OpenUI, an intelligent desktop assistant running as a menu-bar app. You help users get things done on their computer through natural conversation.
 
 You can control the operating system by calling tools. To call a tool, respond with ONLY a valid JSON object and nothing else:
 {"tool": "tool_name", "args": {"key": "value"}}
@@ -64,7 +89,7 @@ You can control the operating system by calling tools. To call a tool, respond w
 After each tool runs you will receive a message starting with "TOOL RESULT" describing what happened. Use it to decide the next step. Chain as many tool calls as the task needs — one per message. When the task is complete, reply to the user in plain natural language (never wrap your final answer in JSON).
 
 Available tools:
-${toolSchemas.map(renderSchema).join('\n')}
+${allSchemas.map(renderSchema).join('\n')}
 
 Browser automation workflow — use this for ALL web-based tasks (booking flights, scraping websites, filling web forms, reading prices, searching the web). Playwright targets elements directly by CSS selector: faster, more reliable, and more precise than pixel-coordinate clicking:
 1. Call browser_navigate(url) — opens the URL in a visible Chromium window the user can watch.
@@ -93,6 +118,7 @@ Figma design workflow — use this when the user mentions "Figma", asks for a de
 2. Call export_figma_frames(file_key, node_ids?) to export frames as PNGs and analyse them with Claude Vision. Prefer the most important screens (main view, key flows).
 3. Call create_figma_comment(file_key, message, node_id?) to post AI-generated feedback directly on the Figma file, anchored to specific frames.
 If the user needs to interact with the Figma web UI directly (inspect prototypes, view comments), call browser_navigate("https://www.figma.com/file/{file_key}") to open it in the Playwright browser.`
+}
 
 /**
  * A strict, focused system prompt used when the user triggers the PR review
@@ -336,7 +362,7 @@ export async function callModel(
   win: BrowserWindow,
   tier: Tier,
   messages: Message[],
-  systemPrompt: string = SYSTEM_PROMPT
+  systemPrompt: string = buildSystemPrompt()
 ): Promise<string> {
   const ollamaUp = await isOllamaRunning()
 
@@ -447,7 +473,7 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
     ? PR_REVIEW_SYSTEM_PROMPT
     : isDesigner
       ? DESIGNER_SYSTEM_PROMPT
-      : SYSTEM_PROMPT
+      : buildSystemPrompt()
 
   // PR review needs more turns: list + diff×N + comment×N.
   // Designer needs more turns: get_file + export×N (with Vision calls) + comment×N.
@@ -506,8 +532,36 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
         detail: 'OpenUI is working…'
       } satisfies TaskUpdate)
 
-      // Execute in Node and report the outcome to the task list.
-      const result = await executeTool(toolCall.tool, toolCall.args, { tier: effectiveTier })
+      // State-changing tools first return PendingApprovalResult — pause and
+      // ask the user via HitlModal before actually running the tool.
+      const rawResult: ToolResult | PendingApprovalResult = await executeTool(
+        toolCall.tool,
+        toolCall.args,
+        { tier: effectiveTier }
+      )
+
+      let result: ToolResult
+      if ('status' in rawResult && rawResult.status === 'pending_approval') {
+        const approved = await waitForHitlApproval(win, rawResult.tool, rawResult.args)
+        if (approved) {
+          result = (await executeTool(toolCall.tool, toolCall.args, {
+            tier: effectiveTier,
+            bypassHitl: true
+          })) as ToolResult
+        } else {
+          result = {
+            ok: false,
+            error: `User denied the action: ${describeToolCall(toolCall.tool, toolCall.args)}. Do not retry; let the user know you cannot proceed without their approval.`
+          }
+        }
+      } else {
+        result = rawResult as ToolResult
+      }
+
+      // Fall back to MCP if the tool is unknown to built-ins.
+      if (!result.ok && result.error?.startsWith('Unknown tool')) {
+        result = await callMcpTool(toolCall.tool, toolCall.args)
+      }
 
       // If a tool detected a missing OS permission, notify the renderer so it
       // can show a modal guiding the user to System Settings.
@@ -564,6 +618,18 @@ export function coerceTier(value: unknown): Tier {
 const MAX_MESSAGE_LEN = 16_000
 
 export function registerAgentIPC(win: BrowserWindow): void {
+  // Resolve the waiting agent loop turn when the user responds to a HITL prompt.
+  ipcMain.on('openui:hitl:response', (_event, payload: unknown) => {
+    if (typeof payload !== 'object' || payload === null) return
+    const { id, approved } = payload as Record<string, unknown>
+    if (typeof id !== 'string') return
+    const resolve = pendingHitlRequests.get(id)
+    if (resolve) {
+      pendingHitlRequests.delete(id)
+      resolve(approved === true)
+    }
+  })
+
   ipcMain.handle('openui:chat', async (_event, payload: unknown) => {
     if (typeof payload !== 'object' || payload === null) return
     const { message, tier } = payload as Record<string, unknown>
@@ -578,6 +644,22 @@ export function registerAgentIPC(win: BrowserWindow): void {
     await handleChat(win, message, coerceTier(tier))
   })
   ipcMain.on('openui:clear-history', () => clearHistory())
+
+  // Poll for Ollama state changes every 60 s. When Ollama comes online after
+  // being absent, notify the renderer so it can switch to local mode and show
+  // a brief "Local AI detected" toast. Silently transitions back to cloud when
+  // Ollama stops — no error shown to the user.
+  let lastOllamaStatus = false
+  setInterval(async () => {
+    const current = await isOllamaRunning()
+    if (current !== lastOllamaStatus) {
+      lastOllamaStatus = current
+      if (current) {
+        emit(win, 'openui:local-ai-available')
+        console.log('[Telemetry] ollama_detected { method: "polling" }')
+      }
+    }
+  }, 60_000)
 }
 
 export function registerConversationIPC(win: BrowserWindow): void {

@@ -8,6 +8,7 @@ import { openSettingsPane, type PermissionTarget } from './permissions'
 import { registerStripeIPC, isPaymentFlowWebContents } from './stripe/checkout'
 import { registerWaitlistIPC } from './waitlist'
 import { closeBrowser } from './tools'
+import { connectMcpServer, disconnectAll, type McpServerConfig } from './mcp-client'
 import { initDatabase, database } from './database'
 import { registerDeepLinkProtocol, setupDeepLinkHandlers } from './auth/deeplink'
 import { openAuthWindow, isAuthWebContents, isAuthWindowOpen } from './auth/authWindow'
@@ -17,6 +18,26 @@ import { grantConsent, denyConsent, getConsentStatus, recordPendingEvent, Consen
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdateAndRestart, openReleasesPage } from './updater/updater'
 import { Events } from './telemetry/events'
 import { indexDirectory } from './rag'
+import {
+  isOllamaInstalled,
+  isOllamaRunning,
+  startOllama,
+  pullModel,
+  getOllamaInstallUrl,
+  dismissOllamaPrompt
+} from './local/ollamaManager'
+import {
+  startRecording,
+  stopRecording,
+  playRecording,
+  recordClickAction,
+  recordKeypressAction,
+  loadMacros,
+  saveMacro,
+  deleteMacro,
+  isRecording,
+  type RecorderAction,
+} from './recorder'
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -345,6 +366,73 @@ app.whenReady().then(async () => {
     return indexDirectory(dirPath.trim())
   })
 
+  // ── Local AI / Ollama IPC ───────────────────────────────────────────────────
+  // Returns current Ollama installation and running state.
+  ipcMain.handle('openui:check-ollama', async () => {
+    const [installed, running] = await Promise.all([isOllamaInstalled(), isOllamaRunning()])
+    return { installed, running }
+  })
+
+  // Opens the official Ollama download page in the OS default browser.
+  // We deliberately never auto-install — the user must opt in.
+  ipcMain.handle('openui:install-ollama', () => {
+    void shell.openExternal(getOllamaInstallUrl())
+  })
+
+  // Attempts to start a locally-installed Ollama daemon (ollama serve).
+  ipcMain.handle('openui:start-ollama', () => startOllama())
+
+  // Records a dismiss action in settings; permanently=true suppresses future prompts.
+  ipcMain.handle('openui:dismiss-ollama-prompt', (_event, payload: unknown) => {
+    const permanent =
+      typeof payload === 'object' && payload !== null && 'permanent' in payload
+        ? Boolean((payload as Record<string, unknown>).permanent)
+        : false
+    return dismissOllamaPrompt(permanent)
+  })
+
+  // Pulls a named model via `ollama pull <modelName>`.
+  ipcMain.handle('openui:pull-model', (_event, payload: unknown) => {
+    const modelName =
+      typeof payload === 'object' && payload !== null && 'modelName' in payload
+        ? String((payload as Record<string, unknown>).modelName)
+        : 'llama3:8b'
+    return pullModel(modelName)
+  })
+
+  // ── Action Recorder / Macros IPC ───────────────────────────────────────────
+  ipcMain.handle('openui:recorder:start', () => startRecording())
+
+  ipcMain.handle('openui:recorder:stop', () => stopRecording())
+
+  ipcMain.handle('openui:recorder:play', (_e, payload: unknown) => {
+    const { actions } = payload as { actions: RecorderAction[] }
+    return playRecording(actions)
+  })
+
+  ipcMain.handle('openui:recorder:record-click', (_e, payload: unknown) => {
+    const { x, y, button } = payload as { x: number; y: number; button?: 'left' | 'right' }
+    recordClickAction(x, y, button)
+  })
+
+  ipcMain.handle('openui:recorder:record-keypress', (_e, payload: unknown) => {
+    const { text } = payload as { text: string }
+    recordKeypressAction(text)
+  })
+
+  ipcMain.handle('openui:recorder:get-macros', () => loadMacros())
+
+  ipcMain.handle('openui:recorder:save-macro', (_e, payload: unknown) => {
+    const { name, actions } = payload as { name: string; actions: RecorderAction[] }
+    return saveMacro(name, actions)
+  })
+
+  ipcMain.handle('openui:recorder:delete-macro', (_e, payload: unknown) => {
+    const { name } = payload as { name: string }
+    return deleteMacro(name)
+  })
+
+  ipcMain.handle('openui:recorder:is-recording', () => isRecording())
 
   if (win) {
     registerAgentIPC(win)
@@ -365,7 +453,12 @@ app.whenReady().then(async () => {
   })
 })
 
+ipcMain.handle('openui:mcp:connect', async (_event, config: unknown) => {
+  return connectMcpServer(config as McpServerConfig)
+})
+
 app.on('before-quit', () => {
+  disconnectAll()
   trackEvent(Events.APP_CLOSED)
   shutdownTelemetry()
 })

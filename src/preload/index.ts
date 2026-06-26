@@ -7,6 +7,14 @@ type TaskSource = 'todo' | 'github'
 type InterviewState = 'idle' | 'asking' | 'listening' | 'evaluating' | 'complete'
 type IpcListener = Parameters<typeof ipcRenderer.on>[1]
 
+type RecorderAction =
+  | { type: 'mousemove'; x: number; y: number; window: string; timestamp: number }
+  | { type: 'mouseclick'; x: number; y: number; button: 'left' | 'right'; window: string; timestamp: number }
+  | { type: 'keypress'; text: string; timestamp: number }
+  | { type: 'delay'; ms: number; timestamp: number }
+
+type RecorderMacro = { name: string; actions: RecorderAction[]; createdAt: string }
+
 /** Signed-in user profile pushed/returned by the main auth layer. */
 type AuthUser = {
   id: string
@@ -53,6 +61,13 @@ type ConversationSummary = {
 type WaitlistResult =
   | { ok: true; alreadySubscribed?: boolean }
   | { ok: false; error: string }
+
+type HitlRequestPayload = {
+  id: string
+  tool: string
+  args: Record<string, unknown>
+  label: string
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const wrap = <T>(cb: (data: T) => void): IpcListener => ((_: any, data: T) => cb(data)) as IpcListener
@@ -329,7 +344,72 @@ const api = {
   // ── App settings (key/value persisted in the SQLite settings table) ─────────
   getSetting: (key: string): Promise<unknown> => ipcRenderer.invoke('openui:get-setting', key),
   setSetting: (key: string, value: unknown): Promise<void> =>
-    ipcRenderer.invoke('openui:set-setting', { key, value })
+    ipcRenderer.invoke('openui:set-setting', { key, value }),
+
+  // ── HITL (Human-in-the-Loop) confirmation ────────────────────────────────────
+  // Main process emits openui:hitl:request when a state-changing tool needs
+  // user approval. The renderer shows HitlModal and calls respondHitl with the
+  // user's decision, which unblocks the agent loop.
+  onHitlRequest: (cb: (payload: HitlRequestPayload) => void): (() => void) => {
+    const fn = wrap<HitlRequestPayload>(cb)
+    ipcRenderer.on('openui:hitl:request', fn)
+    return (): void => { ipcRenderer.removeListener('openui:hitl:request', fn) }
+  },
+
+  respondHitl: (id: string, approved: boolean): void => {
+    ipcRenderer.send('openui:hitl:response', { id, approved })
+  },
+
+  // ── Local AI / Ollama ─────────────────────────────────────────────────────
+  checkOllama: (): Promise<{ installed: boolean; running: boolean }> =>
+    ipcRenderer.invoke('openui:check-ollama'),
+
+  installOllama: (): Promise<void> =>
+    ipcRenderer.invoke('openui:install-ollama'),
+
+  startOllama: (): Promise<boolean> =>
+    ipcRenderer.invoke('openui:start-ollama'),
+
+  dismissOllamaPrompt: (permanent: boolean): Promise<void> =>
+    ipcRenderer.invoke('openui:dismiss-ollama-prompt', { permanent }),
+
+  pullModel: (modelName: string): Promise<boolean> =>
+    ipcRenderer.invoke('openui:pull-model', { modelName }),
+
+  // Fired by the 60-second polling loop when Ollama transitions offline → online.
+  onLocalAIAvailable: (cb: () => void): (() => void) => {
+    const fn = (() => cb()) as IpcListener
+    ipcRenderer.on('openui:local-ai-available', fn)
+    return (): void => { ipcRenderer.removeListener('openui:local-ai-available', fn) }
+  },
+
+  // ── Action Recorder / Macros ───────────────────────────────────────────────
+  recorderStart: (): Promise<void> =>
+    ipcRenderer.invoke('openui:recorder:start'),
+
+  recorderStop: (): Promise<RecorderAction[]> =>
+    ipcRenderer.invoke('openui:recorder:stop'),
+
+  recorderPlay: (actions: RecorderAction[]): Promise<void> =>
+    ipcRenderer.invoke('openui:recorder:play', { actions }),
+
+  recorderRecordClick: (x: number, y: number, button?: 'left' | 'right'): Promise<void> =>
+    ipcRenderer.invoke('openui:recorder:record-click', { x, y, button }),
+
+  recorderRecordKeypress: (text: string): Promise<void> =>
+    ipcRenderer.invoke('openui:recorder:record-keypress', { text }),
+
+  recorderGetMacros: (): Promise<RecorderMacro[]> =>
+    ipcRenderer.invoke('openui:recorder:get-macros'),
+
+  recorderSaveMacro: (name: string, actions: RecorderAction[]): Promise<RecorderMacro> =>
+    ipcRenderer.invoke('openui:recorder:save-macro', { name, actions }),
+
+  recorderDeleteMacro: (name: string): Promise<boolean> =>
+    ipcRenderer.invoke('openui:recorder:delete-macro', { name }),
+
+  recorderIsRecording: (): Promise<boolean> =>
+    ipcRenderer.invoke('openui:recorder:is-recording'),
 }
 
 export type OpenUIApi = typeof api
