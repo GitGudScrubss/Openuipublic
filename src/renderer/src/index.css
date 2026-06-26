@@ -2,6 +2,15 @@
 @tailwind components;
 @tailwind utilities;
 
+@keyframes bannerSlideIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.update-banner-slide-in {
+  animation: bannerSlideIn 0.22s ease-out both;
+}
+
 /* ─────────────────────────────────────────
    RESET & BASE  (ported from design.html)
 ───────────────────────────────────────── */

@@ -218,6 +218,13 @@ export interface OpenUIApi {
   // HITL (Human-in-the-Loop) confirmation.
   onHitlRequest: (cb: (payload: HitlRequestPayload) => void) => () => void
   respondHitl: (id: string, approved: boolean) => void
+  // Local AI / Ollama.
+  checkOllama: () => Promise<{ installed: boolean; running: boolean }>
+  installOllama: () => Promise<void>
+  startOllama: () => Promise<boolean>
+  dismissOllamaPrompt: (permanent: boolean) => Promise<void>
+  pullModel: (modelName: string) => Promise<boolean>
+  onLocalAIAvailable: (cb: () => void) => () => void
 }
 
 declare global {

@@ -350,6 +350,29 @@ const api = {
 
   respondHitl: (id: string, approved: boolean): void => {
     ipcRenderer.send('openui:hitl:response', { id, approved })
+  },
+
+  // ── Local AI / Ollama ─────────────────────────────────────────────────────
+  checkOllama: (): Promise<{ installed: boolean; running: boolean }> =>
+    ipcRenderer.invoke('openui:check-ollama'),
+
+  installOllama: (): Promise<void> =>
+    ipcRenderer.invoke('openui:install-ollama'),
+
+  startOllama: (): Promise<boolean> =>
+    ipcRenderer.invoke('openui:start-ollama'),
+
+  dismissOllamaPrompt: (permanent: boolean): Promise<void> =>
+    ipcRenderer.invoke('openui:dismiss-ollama-prompt', { permanent }),
+
+  pullModel: (modelName: string): Promise<boolean> =>
+    ipcRenderer.invoke('openui:pull-model', { modelName }),
+
+  // Fired by the 60-second polling loop when Ollama transitions offline → online.
+  onLocalAIAvailable: (cb: () => void): (() => void) => {
+    const fn = (() => cb()) as IpcListener
+    ipcRenderer.on('openui:local-ai-available', fn)
+    return (): void => { ipcRenderer.removeListener('openui:local-ai-available', fn) }
   }
 }
 
