@@ -62,6 +62,13 @@ type WaitlistResult =
   | { ok: true; alreadySubscribed?: boolean }
   | { ok: false; error: string }
 
+type HitlRequestPayload = {
+  id: string
+  tool: string
+  args: Record<string, unknown>
+  label: string
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const wrap = <T>(cb: (data: T) => void): IpcListener => ((_: any, data: T) => cb(data)) as IpcListener
 
@@ -338,6 +345,20 @@ const api = {
   getSetting: (key: string): Promise<unknown> => ipcRenderer.invoke('openui:get-setting', key),
   setSetting: (key: string, value: unknown): Promise<void> =>
     ipcRenderer.invoke('openui:set-setting', { key, value }),
+
+  // ── HITL (Human-in-the-Loop) confirmation ────────────────────────────────────
+  // Main process emits openui:hitl:request when a state-changing tool needs
+  // user approval. The renderer shows HitlModal and calls respondHitl with the
+  // user's decision, which unblocks the agent loop.
+  onHitlRequest: (cb: (payload: HitlRequestPayload) => void): (() => void) => {
+    const fn = wrap<HitlRequestPayload>(cb)
+    ipcRenderer.on('openui:hitl:request', fn)
+    return (): void => { ipcRenderer.removeListener('openui:hitl:request', fn) }
+  },
+
+  respondHitl: (id: string, approved: boolean): void => {
+    ipcRenderer.send('openui:hitl:response', { id, approved })
+  },
 
   // ── Local AI / Ollama ─────────────────────────────────────────────────────
   checkOllama: (): Promise<{ installed: boolean; running: boolean }> =>

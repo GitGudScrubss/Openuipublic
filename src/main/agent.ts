@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { Ollama } from 'ollama'
 import { BrowserWindow, ipcMain } from 'electron'
-import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolResult, type Tier } from './tools'
+import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolResult, type PendingApprovalResult, type Tier } from './tools'
 import { getMcpToolSchemas, callMcpTool } from './mcp-client'
 import { database } from './database'
 import { clampTierToEntitlement } from './stripe/pricing'
@@ -44,6 +44,28 @@ let currentConversationId: string | null = null
 const MAX_TOOL_TURNS = 8
 
 let taskSeq = 0
+
+// ── HITL (Human-in-the-Loop) ──────────────────────────────────────────────────
+
+/** Resolvers keyed by request id, awaited while the renderer shows HitlModal. */
+const pendingHitlRequests = new Map<string, (approved: boolean) => void>()
+let hitlSeq = 0
+
+/**
+ * Emit a HITL request to the renderer and return a Promise that resolves once
+ * the user clicks Allow (true) or Deny (false) in the HitlModal.
+ */
+function waitForHitlApproval(
+  win: BrowserWindow,
+  tool: string,
+  args: Record<string, unknown>
+): Promise<boolean> {
+  const id = `hitl${++hitlSeq}`
+  return new Promise<boolean>((resolve) => {
+    pendingHitlRequests.set(id, resolve)
+    emit(win, 'openui:hitl:request', { id, tool, args, label: describeToolCall(tool, args) })
+  })
+}
 
 /** Render one tool schema as a compact signature line for the system prompt. */
 function renderSchema(schema: ToolSchema): string {
@@ -510,8 +532,33 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
         detail: 'OpenUI is working…'
       } satisfies TaskUpdate)
 
-      // Execute in Node — fall back to MCP if the tool is unknown to built-ins.
-      let result = await executeTool(toolCall.tool, toolCall.args, { tier: effectiveTier })
+      // State-changing tools first return PendingApprovalResult — pause and
+      // ask the user via HitlModal before actually running the tool.
+      const rawResult: ToolResult | PendingApprovalResult = await executeTool(
+        toolCall.tool,
+        toolCall.args,
+        { tier: effectiveTier }
+      )
+
+      let result: ToolResult
+      if ('status' in rawResult && rawResult.status === 'pending_approval') {
+        const approved = await waitForHitlApproval(win, rawResult.tool, rawResult.args)
+        if (approved) {
+          result = (await executeTool(toolCall.tool, toolCall.args, {
+            tier: effectiveTier,
+            bypassHitl: true
+          })) as ToolResult
+        } else {
+          result = {
+            ok: false,
+            error: `User denied the action: ${describeToolCall(toolCall.tool, toolCall.args)}. Do not retry; let the user know you cannot proceed without their approval.`
+          }
+        }
+      } else {
+        result = rawResult as ToolResult
+      }
+
+      // Fall back to MCP if the tool is unknown to built-ins.
       if (!result.ok && result.error?.startsWith('Unknown tool')) {
         result = await callMcpTool(toolCall.tool, toolCall.args)
       }
@@ -571,6 +618,18 @@ export function coerceTier(value: unknown): Tier {
 const MAX_MESSAGE_LEN = 16_000
 
 export function registerAgentIPC(win: BrowserWindow): void {
+  // Resolve the waiting agent loop turn when the user responds to a HITL prompt.
+  ipcMain.on('openui:hitl:response', (_event, payload: unknown) => {
+    if (typeof payload !== 'object' || payload === null) return
+    const { id, approved } = payload as Record<string, unknown>
+    if (typeof id !== 'string') return
+    const resolve = pendingHitlRequests.get(id)
+    if (resolve) {
+      pendingHitlRequests.delete(id)
+      resolve(approved === true)
+    }
+  })
+
   ipcMain.handle('openui:chat', async (_event, payload: unknown) => {
     if (typeof payload !== 'object' || payload === null) return
     const { message, tier } = payload as Record<string, unknown>
