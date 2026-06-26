@@ -29,6 +29,7 @@ import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
 import { trackEvent } from './telemetry/posthog'
 import { Events } from './telemetry/events'
+import { searchLocalKnowledge } from './rag'
 
 // execFile (no shell) is used so arguments are passed as an argv array —
 // there is no shell to interpret quotes, pipes, $(...) or `;`.
@@ -872,6 +873,40 @@ async function browser_fill_input(args: Record<string, unknown>): Promise<ToolRe
   }
 }
 
+/**
+ * Search the locally indexed knowledge base (RAG) for chunks semantically
+ * similar to the query.  The index is built by the `openui:rag:index` IPC
+ * handler; returns an empty result set when no index exists yet.
+ */
+async function search_local_files(args: Record<string, unknown>): Promise<ToolResult> {
+  const query = typeof args.query === 'string' ? args.query.trim() : ''
+  if (!query) return { ok: false, error: 'search_local_files requires a string "query".' }
+  if (query.length > 1024) return { ok: false, error: 'search_local_files "query" is too long.' }
+  try {
+    const results = await searchLocalKnowledge(query, 5)
+    if (results.length === 0) {
+      return {
+        ok: true,
+        output:
+          'No matching content found in the local knowledge base. ' +
+          'Index a folder first via the openui:rag:index IPC channel.'
+      }
+    }
+    const formatted = results
+      .map(
+        (r, i) =>
+          `[${i + 1}] (score: ${r.score}) ${r.source}\n${r.text}`
+      )
+      .join('\n\n---\n\n')
+    return { ok: true, output: `Top ${results.length} result(s) from local knowledge base:\n\n${formatted}` }
+  } catch (err) {
+    return {
+      ok: false,
+      error: `search_local_files failed: ${err instanceof Error ? err.message : String(err)}`
+    }
+  }
+}
+
 // ── schemas + dispatch (the LLM-facing surface) ──────────────────────────────
 
 /** JSON schemas the agent injects into the system prompt so the LLM can call. */
@@ -1013,6 +1048,25 @@ export const toolSchemas: ToolSchema[] = [
       },
       required: ['selector', 'text']
     }
+  },
+  {
+    name: 'search_local_files',
+    description:
+      'Search the locally indexed knowledge base (RAG) for content semantically similar to the query. ' +
+      'Returns ranked text chunks with their source file paths. ' +
+      'Requires Ollama running locally with the nomic-embed-text model. ' +
+      'The user must first index a folder via the openui:rag:index IPC channel before results are returned. ' +
+      'Use this tool when the user asks about documents, notes, or files they have indexed locally.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'A natural-language question or keyword phrase to search the local knowledge base.'
+        }
+      },
+      required: ['query']
+    }
   }
 ]
 
@@ -1028,6 +1082,7 @@ const registry: Record<string, Executor> = {
   browser_click,
   browser_extract_text,
   browser_fill_input,
+  search_local_files,
   ...githubRegistry,
   ...figmaRegistry
 }
@@ -1171,6 +1226,8 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
       return `Analyse Figma frames in ${String(args.file_key ?? '')}`
     case 'create_figma_comment':
       return `Comment on Figma file ${String(args.file_key ?? '')}`
+    case 'search_local_files':
+      return `Search local knowledge base for "${String(args.query ?? '')}"`
     default:
       return name
   }
