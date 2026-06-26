@@ -22,6 +22,8 @@ setup(
         "psutil>=5.9.5",
         "pyttsx3>=2.90",
         "PyQt5>=5.15.10",
+        "redis[hiredis]>=5.0.0",
+        "asyncpg>=0.29.0",
     ],
     entry_points={
         "console_scripts": ["openui=main:main"],
