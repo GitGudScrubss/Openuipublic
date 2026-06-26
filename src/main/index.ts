@@ -43,6 +43,13 @@ import {
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
 
+// Timestamp of the on-launch reveal. The blur→hide behaviour is suppressed for
+// a short grace window afterwards so the freshly launched overlay can't vanish
+// before the user has even seen it (e.g. a transient focus change during
+// startup, or Windows foreground-stealing prevention not focusing it cleanly).
+let launchRevealedAt = 0
+const AUTO_HIDE_GRACE_MS = 2500
+
 const isDev = !app.isPackaged
 
 const PERMISSION_TARGETS: readonly PermissionTarget[] = ['accessibility', 'microphone']
@@ -197,6 +204,12 @@ function createWindow(): void {
   // usable during development. Never hide while the OAuth window is open: it is
   // a child of this overlay, so hiding the parent would hide the sign-in window.
   win.on('blur', () => {
+    // Don't dismiss the window in the grace window right after the launch
+    // reveal, nor while first-run onboarding is still in progress — otherwise a
+    // transient focus change hides the freshly opened window before the user
+    // has finished setting up, making the app look like it never opened.
+    if (launchRevealedAt !== 0 && Date.now() - launchRevealedAt < AUTO_HIDE_GRACE_MS) return
+    if (!isOnboardingComplete()) return
     if (app.isPackaged && win && !win.webContents.isDevToolsOpened() && !isAuthWindowOpen()) hideWindow()
   })
 
@@ -209,12 +222,47 @@ function showWindow(): void {
   if (!win) return
   const { x, y, width, height } = overlayBounds()
   win.setBounds({ x, y, width, height })
+  // Re-assert always-on-top and raise to the top before showing. A frameless,
+  // transparent, always-on-top overlay can otherwise fail to surface above the
+  // foreground window on some Windows setups — show() alone is not always
+  // enough to make a topmost layered window actually appear.
+  win.setAlwaysOnTop(true, 'screen-saver')
   win.show()
+  win.moveTop()
   win.focus()
+}
+
+/**
+ * Reveal the overlay once on launch. Bound to both 'ready-to-show' and
+ * 'did-finish-load' (whichever fires first wins); the `launchRevealedAt` guard
+ * makes the second call a no-op. Records the reveal time so the blur→hide
+ * handler leaves a short grace period before it can dismiss the window — without
+ * this an installed app could appear to "not open" because its window flashed
+ * up and was hidden again on the first stray focus change.
+ */
+function revealWindow(): void {
+  if (launchRevealedAt !== 0) return
+  launchRevealedAt = Date.now()
+  showWindow()
 }
 
 function hideWindow(): void {
   win?.hide()
+}
+
+/**
+ * Whether first-run onboarding has been completed, read straight from the
+ * SQLite settings the main process owns. Used to keep the overlay pinned open
+ * during onboarding (see the blur handler). Fails closed (treats onboarding as
+ * incomplete) if the DB is unavailable, which keeps the window visible in the
+ * degraded state where the user most needs to see something.
+ */
+function isOnboardingComplete(): boolean {
+  try {
+    return database.settings.getSetting('onboarding_complete') === true
+  } catch {
+    return false
+  }
 }
 
 function toggleWindow(): void {
@@ -256,8 +304,21 @@ function createTray(): void {
 registerDeepLinkProtocol()
 
 app.whenReady().then(async () => {
-  initDatabase()
-  await initTelemetry()
+  // Startup init is guarded so a failure in any single subsystem (for example
+  // the native better-sqlite3 module failing to load on a freshly installed
+  // machine) cannot abort the whole launch and leave the user staring at an
+  // app that "opened" but shows nothing. Each guard logs and continues so the
+  // window is still created and revealed below.
+  try {
+    initDatabase()
+  } catch (err) {
+    console.error('[openui] Database initialisation failed:', err)
+  }
+  try {
+    await initTelemetry()
+  } catch (err) {
+    console.error('[openui] Telemetry initialisation failed:', err)
+  }
 
   // True menu-bar app: no Dock icon on macOS.
   if (process.platform === 'darwin') app.dock?.hide()
@@ -267,6 +328,20 @@ app.whenReady().then(async () => {
 
   createWindow()
   createTray()
+
+  // Reveal the overlay as soon as it has painted so OpenUI is visibly "open"
+  // the instant it launches (first run shows the onboarding wizard, later runs
+  // show the assistant). The window is created hidden (show: false) only to
+  // avoid a flash of unpainted content — WITHOUT this reveal it would never
+  // appear unless the user happened to click the system-tray icon, which makes
+  // a freshly installed app look like it failed to open entirely. 'ready-to-show'
+  // is the no-flash path; 'did-finish-load' is a fallback in case it doesn't
+  // fire for the transparent window. showWindow() is idempotent, so the
+  // duplicate call is harmless.
+  if (win) {
+    win.once('ready-to-show', () => revealWindow())
+    win.webContents.once('did-finish-load', () => revealWindow())
+  }
 
   // Route deep links to the main window and keep the access token fresh.
   setupDeepLinkHandlers(win)
