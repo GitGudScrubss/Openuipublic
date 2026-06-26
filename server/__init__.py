@@ -7,8 +7,12 @@ Modules:
   queue.py: Priority queue with tier-based prioritization
 """
 
-from tiers import TierGuard, TierId, PermissionError, TIERS
-from queue import PriorityQueue, Task, TaskPriority
+try:
+    from .tiers import TierGuard, TierId, PermissionError, TIERS
+    from .queue import PriorityQueue, Task, TaskPriority
+except ImportError:
+    # Optional: graceful degradation when supabase/redis aren't fully installed
+    pass
 
 __all__ = [
     "TierGuard",
