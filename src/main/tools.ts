@@ -30,6 +30,7 @@ import { figmaToolSchemas, figmaRegistry } from './figma'
 import { trackEvent } from './telemetry/posthog'
 import { Events } from './telemetry/events'
 import { findWorkflow } from './workflows'
+import { searchLocalKnowledge } from './rag'
 
 // execFile (no shell) is used so arguments are passed as an argv array —
 // there is no shell to interpret quotes, pipes, $(...) or `;`.
@@ -78,6 +79,33 @@ export type Tier = 'free' | 'pro' | 'enterprise'
 /** Runtime context injected by the agent loop into every tool execution. */
 export interface ExecutorContext {
   tier: Tier
+  /** Set to true after the user has approved a pending HITL request, bypassing the gate. */
+  bypassHitl?: boolean
+}
+
+/**
+ * Tools that mutate OS or machine state. executeTool returns a
+ * PendingApprovalResult for these unless bypassHitl is set in the context.
+ */
+export const STATE_CHANGING_TOOLS = new Set<string>([
+  'left_click',
+  'type_text',
+  'open_app',
+  'move_mouse',
+  'browser_navigate',
+  'browser_click',
+  'browser_fill_input',
+  'control_calendar',
+])
+
+/**
+ * Returned by executeTool when a state-changing tool needs user approval.
+ * The agent loop pauses and emits openui:hitl:request to the renderer.
+ */
+export interface PendingApprovalResult {
+  status: 'pending_approval'
+  tool: string
+  args: Record<string, unknown>
 }
 
 /**
@@ -873,6 +901,40 @@ async function browser_fill_input(args: Record<string, unknown>): Promise<ToolRe
   }
 }
 
+/**
+ * Search the locally indexed knowledge base (RAG) for chunks semantically
+ * similar to the query.  The index is built by the `openui:rag:index` IPC
+ * handler; returns an empty result set when no index exists yet.
+ */
+async function search_local_files(args: Record<string, unknown>): Promise<ToolResult> {
+  const query = typeof args.query === 'string' ? args.query.trim() : ''
+  if (!query) return { ok: false, error: 'search_local_files requires a string "query".' }
+  if (query.length > 1024) return { ok: false, error: 'search_local_files "query" is too long.' }
+  try {
+    const results = await searchLocalKnowledge(query, 5)
+    if (results.length === 0) {
+      return {
+        ok: true,
+        output:
+          'No matching content found in the local knowledge base. ' +
+          'Index a folder first via the openui:rag:index IPC channel.'
+      }
+    }
+    const formatted = results
+      .map(
+        (r, i) =>
+          `[${i + 1}] (score: ${r.score}) ${r.source}\n${r.text}`
+      )
+      .join('\n\n---\n\n')
+    return { ok: true, output: `Top ${results.length} result(s) from local knowledge base:\n\n${formatted}` }
+  } catch (err) {
+    return {
+      ok: false,
+      error: `search_local_files failed: ${err instanceof Error ? err.message : String(err)}`
+    }
+  }
+}
+
 // ── schemas + dispatch (the LLM-facing surface) ──────────────────────────────
 
 /** JSON schemas the agent injects into the system prompt so the LLM can call. */
@@ -1016,6 +1078,25 @@ export const toolSchemas: ToolSchema[] = [
     }
   },
   {
+    name: 'search_local_files',
+    description:
+      'Search the locally indexed knowledge base (RAG) for content semantically similar to the query. ' +
+      'Returns ranked text chunks with their source file paths. ' +
+      'Requires Ollama running locally with the nomic-embed-text model. ' +
+      'The user must first index a folder via the openui:rag:index IPC channel before results are returned. ' +
+      'Use this tool when the user asks about documents, notes, or files they have indexed locally.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'A natural-language question or keyword phrase to search the local knowledge base.'
+        }
+      },
+      required: ['query']
+    }
+  },
+  {
     name: 'run_workflow',
     description:
       'Look up a saved team workflow by name and return its ordered steps so you can execute them one by one. ' +
@@ -1068,6 +1149,7 @@ const registry: Record<string, Executor> = {
   browser_click,
   browser_extract_text,
   browser_fill_input,
+  search_local_files,
   run_workflow,
   ...githubRegistry,
   ...figmaRegistry
@@ -1108,12 +1190,20 @@ function validateArgs(schema: ToolSchema, args: Record<string, unknown>): string
  * Execute a tool by name. Never throws — any failure (unknown tool, bad args,
  * platform/package error) is returned as `{ ok: false, error }` so the agent
  * loop can feed the failure back to the model and keep reasoning.
+ *
+ * State-changing tools return PendingApprovalResult unless context.bypassHitl
+ * is true (set by the agent loop after the user clicks Allow in HitlModal).
  */
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
   context: ExecutorContext = { tier: 'free' }
-): Promise<ToolResult> {
+): Promise<ToolResult | PendingApprovalResult> {
+  // Gate: require explicit user approval for any state-changing tool.
+  if (STATE_CHANGING_TOOLS.has(name) && !context.bypassHitl) {
+    return { status: 'pending_approval', tool: name, args }
+  }
+
   const schema = toolSchemas.find((s) => s.name === name)
   const fn = registry[name]
   if (!schema || !fn) return { ok: false, error: `Unknown tool "${name}".` }
@@ -1212,6 +1302,8 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
       return `Analyse Figma frames in ${String(args.file_key ?? '')}`
     case 'create_figma_comment':
       return `Comment on Figma file ${String(args.file_key ?? '')}`
+    case 'search_local_files':
+      return `Search local knowledge base for "${String(args.query ?? '')}"`
     case 'run_workflow':
       return `Run workflow "${String(args.workflow_name ?? '')}"`
     default:
