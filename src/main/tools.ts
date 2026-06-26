@@ -29,6 +29,7 @@ import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
 import { trackEvent } from './telemetry/posthog'
 import { Events } from './telemetry/events'
+import { findWorkflow } from './workflows'
 import { searchLocalKnowledge } from './rag'
 
 // execFile (no shell) is used so arguments are passed as an argv array —
@@ -1094,8 +1095,47 @@ export const toolSchemas: ToolSchema[] = [
       },
       required: ['query']
     }
+  },
+  {
+    name: 'run_workflow',
+    description:
+      'Look up a saved team workflow by name and return its ordered steps so you can execute them one by one. ' +
+      'Call this when the user says "run workflow <name>" or asks to trigger a saved automation sequence. ' +
+      'After this tool returns, execute each step in the steps array sequentially using the appropriate tool calls.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workflow_name: {
+          type: 'string',
+          description: 'The exact name of the workflow to run (case-sensitive).'
+        }
+      },
+      required: ['workflow_name']
+    }
   }
 ]
+
+async function run_workflow(args: Record<string, unknown>): Promise<ToolResult> {
+  const workflowName = String(args.workflow_name ?? '').trim()
+  if (!workflowName) return { ok: false, error: 'workflow_name is required.' }
+
+  const result = await findWorkflow(workflowName)
+  if (!result.ok || !result.workflow) return { ok: false, error: result.error }
+
+  const wf = result.workflow
+  const stepsText = wf.steps
+    .map((s, i) => `Step ${i + 1}: tool="${s.tool}", args=${JSON.stringify(s.args)}`)
+    .join('\n')
+
+  return {
+    ok: true,
+    output:
+      `Workflow "${wf.name}" — ${wf.description}\n` +
+      `Trigger: ${wf.trigger}\n\n` +
+      `Execute the following ${wf.steps.length} step(s) in order:\n${stepsText}\n\n` +
+      `Call each tool listed above sequentially to complete the workflow.`
+  }
+}
 
 const registry: Record<string, Executor> = {
   open_app,
@@ -1110,6 +1150,7 @@ const registry: Record<string, Executor> = {
   browser_extract_text,
   browser_fill_input,
   search_local_files,
+  run_workflow,
   ...githubRegistry,
   ...figmaRegistry
 }
@@ -1263,6 +1304,8 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
       return `Comment on Figma file ${String(args.file_key ?? '')}`
     case 'search_local_files':
       return `Search local knowledge base for "${String(args.query ?? '')}"`
+    case 'run_workflow':
+      return `Run workflow "${String(args.workflow_name ?? '')}"`
     default:
       return name
   }

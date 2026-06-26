@@ -62,6 +62,11 @@ type WaitlistResult =
   | { ok: true; alreadySubscribed?: boolean }
   | { ok: false; error: string }
 
+type WorkflowStep = { tool: string; args: Record<string, unknown> }
+type Workflow = { name: string; description: string; trigger: string; steps: WorkflowStep[] }
+type WorkflowResult = { ok: boolean; error?: string }
+type WorkflowImportResult = { ok: boolean; workflow?: Workflow; error?: string }
+
 type HitlRequestPayload = {
   id: string
   tool: string
@@ -345,6 +350,19 @@ const api = {
   getSetting: (key: string): Promise<unknown> => ipcRenderer.invoke('openui:get-setting', key),
   setSetting: (key: string, value: unknown): Promise<void> =>
     ipcRenderer.invoke('openui:set-setting', { key, value }),
+
+  // ── Team / Shared Workflows ───────────────────────────────────────────────────
+  listWorkflows: (): Promise<Workflow[]> =>
+    ipcRenderer.invoke('openui:workflow:list'),
+
+  exportWorkflow: (workflow: Workflow): Promise<WorkflowResult> =>
+    ipcRenderer.invoke('openui:workflow:export', { workflow }),
+
+  importWorkflow: (): Promise<WorkflowImportResult> =>
+    ipcRenderer.invoke('openui:workflow:import'),
+
+  deleteWorkflow: (name: string): Promise<WorkflowResult> =>
+    ipcRenderer.invoke('openui:workflow:delete', { name }),
 
   // ── HITL (Human-in-the-Loop) confirmation ────────────────────────────────────
   // Main process emits openui:hitl:request when a state-changing tool needs

@@ -5,6 +5,7 @@ import PermissionModal from './components/PermissionModal'
 import HitlModal from './components/HitlModal'
 import OnboardingWizard from './components/onboarding/OnboardingWizard'
 import ConsentModal from './components/ConsentModal'
+import WorkflowsUI from './components/WorkflowsUI'
 import { useAssistantAnimations } from './hooks/useAssistantAnimations'
 import { useOnboarding } from './hooks/useOnboarding'
 import { AuthProvider } from './context/AuthContext'
@@ -28,6 +29,7 @@ function AppShell(): JSX.Element {
 
   const [permissionNeeded, setPermissionNeeded] = useState<PermissionTarget | null>(null)
   const [consentNeeded, setConsentNeeded] = useState(false)
+  const [showWorkflows, setShowWorkflows] = useState(false)
   const [hitlRequest, setHitlRequest] = useState<HitlRequestPayload | null>(null)
 
   const { isComplete, isLoading, completeOnboarding } = useOnboarding()
@@ -91,6 +93,13 @@ function AppShell(): JSX.Element {
     [completeOnboarding]
   )
 
+  const handleRunWorkflow = useCallback((workflowName: string): void => {
+    window.openui
+      .getTier()
+      .then((tier) => window.openui.chat(`Run workflow: ${workflowName}`, tier as 'free' | 'pro' | 'enterprise'))
+      .catch(() => {})
+  }, [])
+
   return (
     <div ref={overlayRef} className="openui-overlay" onMouseDown={handleBackdrop}>
       {isLoading ? (
@@ -106,6 +115,35 @@ function AppShell(): JSX.Element {
             initialMessage={initialMessage}
           />
           <TaskListPopup />
+          {/* Workflows toggle button — bottom-left corner */}
+          <button
+            onClick={() => setShowWorkflows(true)}
+            title="Team Workflows"
+            style={{
+              position: 'fixed',
+              bottom: 24,
+              left: 24,
+              zIndex: 9000,
+              background: 'rgba(18,18,22,0.85)',
+              border: '1px solid rgba(167,139,250,0.3)',
+              borderRadius: 10,
+              color: '#a78bfa',
+              cursor: 'pointer',
+              fontSize: 11,
+              fontWeight: 600,
+              padding: '6px 11px',
+              backdropFilter: 'blur(8px)',
+              letterSpacing: '0.03em'
+            }}
+          >
+            Workflows
+          </button>
+          {showWorkflows && (
+            <WorkflowsUI
+              onClose={() => setShowWorkflows(false)}
+              onRunWorkflow={handleRunWorkflow}
+            />
+          )}
           {permissionNeeded && (
             <PermissionModal
               permission={permissionNeeded}
