@@ -4,7 +4,8 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { BrowserWindow, ipcMain } from 'electron'
 import { coerceTier, handleChat } from './agent'
-import { getUserTier } from './auth/sessionManager'
+import { getUserTier, getCurrentUser } from './auth/sessionManager'
+import { getDb } from './database/init'
 import { trackEvent } from './telemetry/posthog'
 import { Events } from './telemetry/events'
 
@@ -137,6 +138,32 @@ export async function synthesizeSpeech(text: string): Promise<Buffer> {
   return Buffer.from(await response.arrayBuffer())
 }
 
+function getVoiceSecondsToday(userId: string): number {
+  try {
+    const db = getDb()
+    const today = new Date().toISOString().slice(0, 10)
+    const row = db
+      .prepare('SELECT seconds_used FROM voice_usage WHERE user_id = ? AND date = ?')
+      .get(userId, today) as { seconds_used: number } | undefined
+    return row?.seconds_used ?? 0
+  } catch {
+    return 0
+  }
+}
+
+function recordVoiceUsage(userId: string, seconds: number): void {
+  try {
+    const db = getDb()
+    const today = new Date().toISOString().slice(0, 10)
+    db.prepare(
+      `INSERT INTO voice_usage (user_id, date, seconds_used) VALUES (?, ?, ?)
+       ON CONFLICT (user_id, date) DO UPDATE SET seconds_used = seconds_used + excluded.seconds_used`
+    ).run(userId, today, seconds)
+  } catch (err) {
+    console.error('[voice] Failed to record usage:', err)
+  }
+}
+
 export function registerVoiceIPC(win: BrowserWindow): void {
   ipcMain.handle('openui:voice', async (_event, payload: unknown) => {
     if (typeof payload !== 'object' || payload === null) return
@@ -159,6 +186,19 @@ export function registerVoiceIPC(win: BrowserWindow): void {
     // Use server-side tier for whisper routing — free tier uses local whisper.cpp
     // (if configured), pro/enterprise use the OpenAI Whisper API.
     const serverTier = getUserTier()
+    const userId = (await getCurrentUser())?.id ?? 'anonymous'
+
+    // Enforce per-tier daily Whisper transcription cap before hitting the API.
+    // Free: 300 s/day (5 min). Pro: 3600 s/day (1 h). Enterprise: unlimited.
+    if (serverTier !== 'enterprise') {
+      const cap = serverTier === 'pro' ? 3600 : 300
+      const used = getVoiceSecondsToday(userId)
+      if (used >= cap) {
+        emit(win, 'openui:chat:error', 'Daily voice limit reached. Upgrade to Pro for more voice time.')
+        return
+      }
+    }
+
     trackEvent(Events.VOICE_RECORDING_STARTED)
 
     let transcript: string
@@ -192,6 +232,7 @@ export function registerVoiceIPC(win: BrowserWindow): void {
 
     // Rough duration estimate: compressed audio at ~12 KB/s
     const durationSeconds = Math.round(audioBuffer.byteLength / 12000)
+    recordVoiceUsage(userId, durationSeconds)
     trackEvent(Events.VOICE_RECORDING_COMPLETED, {
       duration_seconds: durationSeconds,
       tier: safeTier,

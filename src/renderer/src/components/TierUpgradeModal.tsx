@@ -21,7 +21,7 @@ const TIERS = [
     color: '#7c3aed',
     bg: '#ede9fe',
     features: ['Claude Sonnet (cloud)', 'Claude Vision for screen reading', 'Whisper API transcription', 'Everything in Free'],
-    priceLabel: '$12 / month',
+    priceLabel: '$19 / month',
     priceId: import.meta.env.VITE_STRIPE_PRO_PRICE_ID as string | undefined
   },
   {
@@ -29,7 +29,7 @@ const TIERS = [
     label: 'Enterprise',
     color: '#b45309',
     bg: '#fef3c7',
-    features: ['Claude Opus (most capable)', 'Private GPU endpoint', 'Priority support', 'Everything in Pro'],
+    features: ['Claude Sonnet — most capable available model', 'Private GPU endpoint', 'Priority support', 'Everything in Pro'],
     priceLabel: '$49 / month',
     priceId: import.meta.env.VITE_STRIPE_ENTERPRISE_PRICE_ID as string | undefined
   }
@@ -76,7 +76,9 @@ export default function TierUpgradeModal({ payload, onDismiss }: Props): JSX.Ele
               marginBottom: 12
             }}
           >
-            <span style={{ fontSize: 22 }}>⚡</span>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M13 2L4 14h8l-1 8 9-12h-8l1-8z" fill="white" />
+            </svg>
           </div>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#1c1c1e', letterSpacing: '-0.03em' }}>
             Upgrade your plan
