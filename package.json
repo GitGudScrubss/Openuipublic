@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "openui",
     "version":  "0.1.1",
     "description":  "OpenUI â€” a macOS menu-bar AI assistant (Electron + Vite + React + TypeScript)",
