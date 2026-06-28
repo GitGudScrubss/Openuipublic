@@ -71,6 +71,33 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # ── Preflight: fail LOUDLY if publishable build secrets are missing ──────
+      # SUPABASE_URL / SUPABASE_ANON_KEY are baked into the main bundle at build
+      # time (see electron.vite.config.ts). When they are empty, Google sign-in
+      # silently breaks in the shipped app ("SUPABASE_URL is not set"). Fail the
+      # release NOW — with a clear message — instead of shipping a broken binary.
+      - name: Verify required build secrets are present
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          missing=0
+          for name in SUPABASE_URL SUPABASE_ANON_KEY; do
+            val="${!name}"
+            if [ -z "$val" ]; then
+              echo "::error::$name is EMPTY — add it as a *Repository* secret on Satyabrat2005/Openui (Settings → Secrets and variables → Actions)."
+              missing=1
+            else
+              echo "$name is present (length ${#val})."
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Refusing to build a release with missing auth secrets — Google sign-in would be broken in the shipped app."
+            exit 1
+          fi
+          echo "All required build secrets are present."
+
       - name: Build macOS DMG
         if: matrix.os == 'macos-latest'
         run: npm run build:mac
