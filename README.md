@@ -1,6 +1,6 @@
 # OpenUI
 
-**OpenUI** is a macOS menu-bar AI assistant built with Electron, React, TypeScript, and Vite. It lives quietly in the system tray and surfaces as a transparent floating overlay when you need it. Under the hood it connects to Anthropic Claude (cloud-first via a Supabase proxy), OpenAI Whisper, Ollama (optional local fallback), and a suite of OS-automation, code, design, and developer tools.
+**OpenUI** is a Windows and macOS menu-bar AI assistant built with Electron, React, TypeScript, and Vite. It lives quietly in the system tray and surfaces as a transparent floating overlay when you need it. Under the hood it connects to Anthropic Claude (cloud-first via a Supabase proxy), OpenAI Whisper, Ollama (optional local fallback), and a suite of OS-automation, code, design, and developer tools.
 
 ---
 
