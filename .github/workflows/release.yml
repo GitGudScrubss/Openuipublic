@@ -100,7 +100,22 @@ jobs:
 
       - name: Build macOS DMG
         if: matrix.os == 'macos-latest'
-        run: npm run build:mac
+        shell: bash
+        # electron-builder fetches its packaging binaries (winCodeSign, nsis, …)
+        # at build time, and that host intermittently returns 502/timeouts — this
+        # has broken past releases. Retry the whole build so a transient download
+        # blip can't fail a release; already-downloaded binaries are cached, so a
+        # retry is cheap. A genuine error still fails all 3 attempts and surfaces.
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::build:mac attempt $attempt"
+            if npm run build:mac; then echo "::endgroup::"; exit 0; fi
+            echo "::endgroup::"
+            echo "::warning::build:mac failed on attempt $attempt (often a transient electron-builder binary download — 502/timeout). Retrying in 30s…"
+            sleep 30
+          done
+          echo "::error::build:mac failed after 3 attempts."
+          exit 1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Supabase URL + anon key are PUBLISHABLE (safe to ship) and are baked
@@ -125,7 +140,21 @@ jobs:
 
       - name: Build Windows EXE
         if: matrix.os == 'windows-latest'
-        run: npm run build:win
+        shell: bash
+        # Same transient-download hardening as macOS: an HTTP 502 from
+        # electron-builder's NSIS binary host (nsis-resources-*.7z) failed the
+        # v7.0.1 Windows build even though packaging itself was fine. Retry so a
+        # flaky download can't break the release.
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::build:win attempt $attempt"
+            if npm run build:win; then echo "::endgroup::"; exit 0; fi
+            echo "::endgroup::"
+            echo "::warning::build:win failed on attempt $attempt (often a transient electron-builder binary download — 502/timeout). Retrying in 30s…"
+            sleep 30
+          done
+          echo "::error::build:win failed after 3 attempts."
+          exit 1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Supabase URL + anon key are PUBLISHABLE (safe to ship) and are baked
