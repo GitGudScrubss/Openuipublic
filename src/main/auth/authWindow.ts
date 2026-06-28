@@ -1,52 +1,51 @@
 /**
- * authWindow.ts — the Google OAuth sign-in window.
+ * authWindow.ts — Google OAuth via system browser (PRIMARY path).
  *
- * `openAuthWindow()` opens a dedicated BrowserWindow at Supabase's
- * `/auth/v1/authorize` endpoint for Google. The primary way the flow finishes is
- * the `openui://auth-callback` deep link (see deeplink.ts); the navigation
- * listeners here are a FALLBACK that captures the callback URL directly from the
- * window in case the OS does not route the deep link back to us (common on
- * first-time setup, especially on Windows).
+ * WHY THIS APPROACH:
+ * Google's OAuth policy blocks sign-in inside embedded user agents — which
+ * includes ALL Electron BrowserWindows. Loading the Google consent screen
+ * inside Electron produces "Sign-in is temporarily unavailable" because Google
+ * fingerprints the Electron/Chrome user-agent string and blocks it.
  *
- * Cross-platform: window chrome is chosen per `process.platform` — a clean
- * hidden-inset title bar on macOS, standard frame controls on Windows/Linux.
+ * THE FIX: shell.openExternal() opens the Supabase authorize URL in the user's
+ * real system browser (Chrome, Firefox, Edge, Safari). Google allows this.
+ * The callback token arrives via the openui:// deep link — handled in deeplink.ts.
  *
- * NOTE on embedded OAuth: Google may reject sign-in inside an embedded user
- * agent. The deep-link path (system browser) is the robust route; this window is
- * the in-app convenience/fallback the task requires.
+ * FLOW:
+ *   1. openAuthWindow() → shell.openExternal(supabaseAuthorizeUrl)
+ *   2. User completes Google sign-in in their real browser
+ *   3. Supabase redirects to openui://auth-callback#access_token=…
+ *   4. OS delivers deep link to this Electron process
+ *   5. deeplink.ts → completeAuth() → tokens saved → renderer notified
+ *
+ * A small "waiting" overlay window is shown while the user is in their browser
+ * so they know the app is listening. It closes automatically on success/failure.
  */
-import { BrowserWindow, type WebContents } from 'electron'
+import { BrowserWindow, shell, type WebContents } from 'electron'
 import { handleDeepLink } from './deeplink'
 
 let authWindow: BrowserWindow | null = null
 
-// webContents we created for OAuth, so the global navigation lock in index.ts
-// can let them roam across the Supabase/Google origins the flow needs.
 const authContents = new WeakSet<WebContents>()
 
-/** True if the given webContents belongs to an OAuth window we opened. */
+/** True if the given webContents belongs to an auth waiting window we opened. */
 export function isAuthWebContents(contents: WebContents): boolean {
   return authContents.has(contents)
 }
 
-/** True while an OAuth window is open (used to keep the overlay from hiding). */
+/** True while an auth flow is in progress (keeps the overlay from auto-hiding). */
 export function isAuthWindowOpen(): boolean {
   return Boolean(authWindow && !authWindow.isDestroyed())
 }
 
 /**
- * Open (or focus) the Google OAuth window.
- *
- * @param parent the main overlay window. Passing it makes the OAuth window a
- *   modal child, which both grabs input and — importantly — stacks above the
- *   always-on-top transparent overlay (a standalone window would render behind
- *   it). Falls back to the first live window when omitted.
- * @returns the window, or null when Supabase is not configured.
+ * Start the Google OAuth flow via the system browser.
+ * Returns the waiting-window BrowserWindow, or null if SUPABASE_URL is missing.
  */
 export function openAuthWindow(parent?: BrowserWindow | null): BrowserWindow | null {
   const supabaseUrl = process.env.SUPABASE_URL
   if (!supabaseUrl) {
-    console.error('[openui] Cannot open auth window — SUPABASE_URL is not set.')
+    console.error('[openui] Cannot start auth — SUPABASE_URL is not set.')
     return null
   }
 
@@ -60,45 +59,76 @@ export function openAuthWindow(parent?: BrowserWindow | null): BrowserWindow | n
       ? parent
       : BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()) ?? null
 
+  // ── Build the authorize URL ─────────────────────────────────────────────────
+  const authorizeUrl = new URL('/auth/v1/authorize', supabaseUrl)
+  authorizeUrl.searchParams.set('provider', 'google')
+  authorizeUrl.searchParams.set('redirect_to', 'openui://auth-callback')
+
+  // ── PRIMARY: open in system browser (bypasses Google embedded-UA block) ────
+  void shell.openExternal(authorizeUrl.toString())
+
+  // ── Waiting overlay (shown while user signs in on system browser) ───────────
   const isMac = process.platform === 'darwin'
-  // Platform-specific chrome — the only place the auth flow branches on OS.
   const chrome = isMac
     ? ({ titleBarStyle: 'hiddenInset', frame: false } as const)
     : ({ frame: true } as const)
 
   authWindow = new BrowserWindow({
-    width: 800,
-    height: 700,
+    width: 400,
+    height: 220,
     center: true,
-    resizable: true,
-    title: 'Sign in to OpenUI',
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    title: 'Signing in to OpenUI…',
     autoHideMenuBar: true,
     parent: parentWindow ?? undefined,
     modal: Boolean(parentWindow),
     show: false,
     ...chrome,
     webPreferences: {
-      // External web content: no node, isolated, sandboxed. A separate session
-      // partition keeps Google/Supabase cookies out of the app's own session.
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      partition: 'persist:openui-auth'
     }
   })
 
   authContents.add(authWindow.webContents)
 
-  // Build `${SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=openui://auth-callback`
-  // (URLSearchParams percent-encodes redirect_to, which Supabase decodes).
-  const authorizeUrl = new URL('/auth/v1/authorize', supabaseUrl)
-  authorizeUrl.searchParams.set('provider', 'google')
-  authorizeUrl.searchParams.set('redirect_to', 'openui://auth-callback')
+  // Inline waiting-page HTML — no external file needed
+  const waitingHtml = `data:text/html;charset=utf-8,${encodeURIComponent(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    background:#0f0f13;color:#e2e8f0;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    height:100vh;gap:14px;user-select:none;-webkit-app-region:drag;
+  }
+  .spinner{
+    width:32px;height:32px;
+    border:3px solid rgba(167,139,250,0.2);
+    border-top-color:#a78bfa;border-radius:50%;
+    animation:spin 0.75s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  h2{font-size:14px;font-weight:600;color:#f1f5f9}
+  p{font-size:11px;color:#64748b;text-align:center;max-width:280px;line-height:1.5}
+  .hint{font-size:10px;color:#475569;margin-top:4px}
+</style>
+</head>
+<body>
+  <div class="spinner"></div>
+  <h2>Complete sign-in in your browser</h2>
+  <p>A Google sign-in page has opened in your default browser.<br/>This window closes automatically when done.</p>
+  <p class="hint">Didn't see it? Check your taskbar.</p>
+</body>
+</html>`)}`
 
-  // FALLBACK interception: if the window itself navigates to openui://… (because
-  // the OS deep link didn't fire), grab the URL here. will-redirect catches the
-  // 302 to the custom scheme; will-navigate catches form/link navigations. IPC
-  // results go to the main window, not this OAuth window.
+  // FALLBACK: intercept openui:// if OS delivers the deep link into this window
   const onNavigate = (event: Electron.Event, url: string): void => {
     if (url.startsWith('openui://')) {
       event.preventDefault()
@@ -109,15 +139,13 @@ export function openAuthWindow(parent?: BrowserWindow | null): BrowserWindow | n
   authWindow.webContents.on('will-navigate', onNavigate)
 
   authWindow.once('ready-to-show', () => authWindow?.show())
-  authWindow.on('closed', () => {
-    authWindow = null
-  })
+  authWindow.on('closed', () => { authWindow = null })
 
-  void authWindow.loadURL(authorizeUrl.toString())
+  void authWindow.loadURL(waitingHtml)
   return authWindow
 }
 
-/** Close the OAuth window if it is open. Safe to call at any time. */
+/** Close the waiting window. Called by completeAuth() on success or failure. */
 export function closeAuthWindow(): void {
   if (authWindow && !authWindow.isDestroyed()) {
     authWindow.close()
