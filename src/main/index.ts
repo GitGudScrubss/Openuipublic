@@ -421,6 +421,22 @@ app.whenReady().then(async () => {
 
   // ── App settings IPC (key/value in the SQLite settings table) ───────────────
   // Used by onboarding (`onboarding_complete`) and any future persisted prefs.
+  // ── Legal pages IPC ────────────────────────────────────────────────────────
+  // Open the bundled privacy / terms HTML with the OS default browser.
+  ipcMain.handle('open-privacy', async () => {
+    const filePath = isDev
+      ? join(__dirname, '../../src/renderer/privacy.html')
+      : join(__dirname, '../renderer/privacy.html')
+    await shell.openPath(filePath)
+  })
+
+  ipcMain.handle('open-terms', async () => {
+    const filePath = isDev
+      ? join(__dirname, '../../src/renderer/terms.html')
+      : join(__dirname, '../renderer/terms.html')
+    await shell.openPath(filePath)
+  })
+
   ipcMain.handle('openui:get-setting', (_event, key: unknown) =>
     typeof key === 'string' ? database.settings.getSetting(key) : null
   )

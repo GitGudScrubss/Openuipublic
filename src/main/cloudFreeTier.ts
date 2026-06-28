@@ -25,6 +25,7 @@ import { refreshSession } from './auth/sessionManager'
 import { getCurrentUserId } from './stripe/subscriptionSync'
 import { dailyMessageLimit } from './stripe/pricing'
 import { database } from './database'
+import { sendMessage as serverSendMessage } from './serverClient'
 
 /** Payload pushed to the renderer so it can show "15/20 messages today". */
 export interface UsageUpdate {
@@ -149,6 +150,11 @@ export async function callCloudProxy(
   systemPrompt: string,
   modelKey: string
 ): Promise<string> {
+  // Route through the new backend when configured; Supabase proxy is the fallback.
+  if (process.env.VITE_SERVER_URL) {
+    return serverSendMessage(win, tier, messages, systemPrompt, modelKey)
+  }
+
   const userId = getCurrentUserId()
   const baseUrl = process.env.SUPABASE_URL
   const anonKey = process.env.SUPABASE_ANON_KEY

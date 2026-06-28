@@ -55,6 +55,16 @@ export default function FirstChatStep({ onSubmit }: Props): JSX.Element {
       <div className="ob-suggest" style={{ marginTop: 22 }}>
         {SUGGESTIONS.map((s) => (
           <button key={s.type} className="ob-suggest-row" onClick={() => handleSuggestion(s)}>
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: '#007aff',
+                flexShrink: 0,
+                display: 'inline-block'
+              }}
+            />
             <span>{s.text}</span>
           </button>
         ))}

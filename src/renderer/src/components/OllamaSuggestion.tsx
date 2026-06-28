@@ -61,7 +61,10 @@ export default function OllamaSuggestion(): JSX.Element | null {
   if (cardState === 'success') {
     return (
       <div style={cardStyle}>
-        <span style={{color:'#34d399',fontSize:13}}>✓</span>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }}>
+          <circle cx="8" cy="8" r="7" stroke="#34c759" strokeWidth="1.4" />
+          <path d="M5 8l2 2 4-4" stroke="#34c759" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
         <div style={{ flex: 1 }}>
           <div style={titleStyle}>Local AI is active!</div>
           <div style={bodyStyle}>You now have unlimited free messages.</div>
@@ -92,7 +95,6 @@ export default function OllamaSuggestion(): JSX.Element | null {
   // ── Default suggestion card ────────────────────────────────────────────────
   return (
     <div style={cardStyle}>
-      <span style={{color:'#a78bfa',fontSize:13}}>→</span>
       <div style={{ flex: 1 }}>
         <div style={titleStyle}>Want unlimited free messages?</div>
         <div style={bodyStyle}>Install local AI for unlimited offline use — no cloud needed.</div>
