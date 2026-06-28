@@ -82,19 +82,22 @@ export function isCloudProxyConfigured(): boolean {
 
 /** Heuristic words that mark a request as "worth a premium cloud model". */
 const COMPLEX_RE =
-  /\b(refactor|architect|debug|analy[sz]e|investigat\w*|multi[- ]?step|plan|design|review|optimi[sz]e|migrat\w*|implement|complex|step[- ]by[- ]step)\b/i
+  /\b(refactor|architect|debug|analy[sz]e|investigat\w*|multi[- ]?step|plan|design|review|optimi[sz]e|migrat\w*|implement|complex|step[- ]by[- ]step|write|code|function|class|script|build|fix|test|file|read|list|run|terminal|bash|python|javascript|typescript|react|html|css|sql|api|endpoint|website|app|program)\b/i
 
 /**
  * Cheap, synchronous classification of whether the latest user request looks
  * "complex" enough to deserve a cloud model on Pro (otherwise Pro keeps it local
- * on Ollama to save cost). Deliberately a heuristic — we never spend a model call
- * just to decide which model to call.
+ * on Ollama to save cost). Also used to detect coding/heavy tasks for free-tier
+ * Ollama routing. Deliberately a heuristic — we never spend a model call just to
+ * decide which model to call.
  */
 export function classifyTaskComplexity(messages: Message[]): boolean {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')
   if (!lastUser) return false
   if (lastUser.content.length > 280) return true
   if (COMPLEX_RE.test(lastUser.content)) return true
+  // Tool calls in history signal a complex, multi-step agentic workflow.
+  if (messages.some((m) => m.content.trim().startsWith('{"tool":') || m.content.startsWith('TOOL RESULT'))) return true
   // Long, tool-heavy conversations are the ones that benefit from a stronger model.
   return messages.length > 6
 }
