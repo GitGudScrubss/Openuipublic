@@ -11,16 +11,15 @@ interface Props {
 }
 
 interface Suggestion {
-  emoji: string
   text: string
   /** Reported via telemetry so we can see which prompts convert. */
   type: string
 }
 
 const SUGGESTIONS: ReadonlyArray<Suggestion> = [
-  { emoji: '🖥️', text: 'Open my calendar', type: 'calendar' },
-  { emoji: '📄', text: 'Find my latest resume', type: 'resume' },
-  { emoji: '💡', text: 'What can you do?', type: 'capabilities' }
+  { text: 'Open my calendar', type: 'calendar' },
+  { text: 'Find my latest resume', type: 'resume' },
+  { text: 'What can you do?', type: 'capabilities' }
 ]
 
 /**
@@ -56,7 +55,16 @@ export default function FirstChatStep({ onSubmit }: Props): JSX.Element {
       <div className="ob-suggest" style={{ marginTop: 22 }}>
         {SUGGESTIONS.map((s) => (
           <button key={s.type} className="ob-suggest-row" onClick={() => handleSuggestion(s)}>
-            <span className="ob-suggest-emoji">{s.emoji}</span>
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: '#007aff',
+                flexShrink: 0,
+                display: 'inline-block'
+              }}
+            />
             <span>{s.text}</span>
           </button>
         ))}

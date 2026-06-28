@@ -63,6 +63,13 @@ export function applySchema(): void {
       updated_at INTEGER DEFAULT (strftime('%s','now'))
     );
 
+    CREATE TABLE IF NOT EXISTS voice_usage (
+      user_id TEXT NOT NULL,
+      date TEXT NOT NULL,
+      seconds_used INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, date)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
     CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
     CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);

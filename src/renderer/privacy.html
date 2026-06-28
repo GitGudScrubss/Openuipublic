@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — OpenUI</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 15px;
+      line-height: 1.7;
+      color: #1c1c1e;
+      background: #fff;
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 48px 24px 80px;
+    }
+    h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.03em; margin-bottom: 6px; }
+    .meta { color: #636366; font-size: 13px; margin-bottom: 40px; }
+    h2 { font-size: 17px; font-weight: 600; margin: 32px 0 8px; }
+    p { color: #3a3a3c; margin-bottom: 12px; }
+    a { color: #007aff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    hr { border: none; border-top: 1px solid #e5e5ea; margin: 40px 0; }
+  </style>
+</head>
+<body>
+  <h1>Privacy Policy</h1>
+  <p class="meta">Effective date: June 28, 2026 &nbsp;·&nbsp; Neurotitan Holdings</p>
+
+  <p>This Privacy Policy describes how Neurotitan Holdings ("<strong>we</strong>", "<strong>our</strong>", or "<strong>us</strong>") collects, uses, and protects information when you use OpenUI (the "<strong>Service</strong>"). By using the Service you agree to the practices described here.</p>
+
+  <h2>1. Information We Collect</h2>
+  <p><strong>Account information.</strong> When you sign in, we collect your email address and a display name via Google OAuth, handled by Supabase Auth. We do not store your Google password.</p>
+  <p><strong>Usage metrics.</strong> We collect anonymous usage events (feature interactions, session counts, error rates) to understand how the product is used. These events are keyed to a randomly-generated identifier, not your email.</p>
+  <p><strong>Conversation logs.</strong> Messages you send to the AI assistant are processed in real time and stored locally on your device in a SQLite database inside your operating system's user-data directory. We do not transmit conversation content to our servers.</p>
+  <p><strong>Subscription data.</strong> If you subscribe to Pro or Enterprise, Stripe processes your payment and we receive a subscription status token. We do not store your card number.</p>
+  <p><strong>Voice recordings.</strong> Audio recorded for transcription is sent directly to OpenAI's Whisper API and is not stored by us. Audio is deleted from memory immediately after transcription.</p>
+
+  <h2>2. How We Use Your Information</h2>
+  <p>We use account information to authenticate you and associate your subscription tier with your session. We use anonymous usage metrics to improve the product. We use subscription data to gate access to paid features. We do not use your data for advertising.</p>
+
+  <h2>3. Supabase Auth</h2>
+  <p>Authentication is handled by <a href="https://supabase.com" target="_blank" rel="noopener">Supabase</a>. Your email and OAuth tokens are stored in Supabase's managed database, subject to <a href="https://supabase.com/privacy" target="_blank" rel="noopener">Supabase's Privacy Policy</a>. We access only the email and user ID returned by the OAuth flow.</p>
+
+  <h2>4. Analytics — PostHog</h2>
+  <p>We use <a href="https://posthog.com" target="_blank" rel="noopener">PostHog</a> for anonymous product analytics. All events are sent without PII. You can opt out of analytics at any time in <strong>Settings → Privacy</strong>; when opted out, no events are sent. PostHog's data processing is described in their <a href="https://posthog.com/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+
+  <h2>5. Payment Processing — Stripe</h2>
+  <p>Payments are handled by <a href="https://stripe.com" target="_blank" rel="noopener">Stripe</a>. Card details are entered directly into Stripe's secure form and are never transmitted to our servers. Stripe's data practices are described in their <a href="https://stripe.com/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+
+  <h2>6. Data Sharing and Sale</h2>
+  <p>We do not sell, rent, or trade your personal information to third parties. We share data only with the sub-processors named above (Supabase, PostHog, Stripe, OpenAI for transcription) to the extent necessary to provide the Service.</p>
+
+  <h2>7. Data Retention</h2>
+  <p>Conversation data lives on your device and is deleted when you uninstall OpenUI or clear the app's user-data folder. Account information is retained in Supabase while your account is active. You may request deletion by contacting us at the address below.</p>
+
+  <h2>8. Security</h2>
+  <p>Communication between the app and our services is encrypted with TLS. Local data is stored in the operating system's user-data directory, which is protected by OS-level access controls. We apply the principle of least privilege in all API interactions.</p>
+
+  <h2>9. Children</h2>
+  <p>OpenUI is not directed at children under 13. We do not knowingly collect personal information from children. If you believe a child has provided us with personal information, please contact us and we will delete it.</p>
+
+  <h2>10. Changes to This Policy</h2>
+  <p>We may update this Privacy Policy from time to time. Material changes will be communicated via an in-app notice. Continued use of the Service after a change constitutes acceptance of the updated policy.</p>
+
+  <h2>11. Contact</h2>
+  <p>For privacy questions or data deletion requests, contact us at <a href="mailto:neurotitanholdings@gmail.com">neurotitanholdings@gmail.com</a>.</p>
+
+  <hr />
+  <p style="font-size:13px; color:#8e8e93;">&copy; 2026 Neurotitan Holdings. All rights reserved.</p>
+</body>
+</html>

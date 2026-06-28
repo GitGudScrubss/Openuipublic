@@ -5,10 +5,46 @@ interface Props {
   onNext: () => void
 }
 
-const FEATURES: ReadonlyArray<{ emoji: string; label: string }> = [
-  { emoji: '🖥️', label: 'Runs on your device' },
-  { emoji: '🔒', label: 'Your data stays local' },
-  { emoji: '⚡', label: 'Works instantly' }
+function MonitorIcon(): JSX.Element {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1" y="2" width="14" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M5 13h6M8 11v2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function CloudIcon(): JSX.Element {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M11.5 10.5H4.5a2.5 2.5 0 010-5h.1A3.5 3.5 0 0111 4.5a2 2 0 01.5 6z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function BoltIcon(): JSX.Element {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M9 2L4 9h4.5L7 14l7-8H9.5L11 2z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+const FEATURES: ReadonlyArray<{ icon: () => JSX.Element; label: string }> = [
+  { icon: MonitorIcon, label: 'Runs on your device' },
+  { icon: CloudIcon, label: 'Cloud AI, no setup needed' },
+  { icon: BoltIcon, label: 'Works instantly' }
 ]
 
 /**
@@ -41,7 +77,7 @@ export default function WelcomeStep({ onNext }: Props): JSX.Element {
       <div ref={featuresRef} className="ob-feature-card" style={{ marginTop: 26 }}>
         {FEATURES.map((f) => (
           <div key={f.label} className="ob-feature-row">
-            <span className="ob-feature-emoji">{f.emoji}</span>
+            <span className="ob-feature-emoji"><f.icon /></span>
             <span>{f.label}</span>
           </div>
         ))}
