@@ -247,6 +247,7 @@ export interface OpenUIApi {
   dismissOllamaPrompt: (permanent: boolean) => Promise<void>
   pullModel: (modelName: string) => Promise<boolean>
   onLocalAIAvailable: (cb: () => void) => () => void
+  onOllamaSuggestion: (cb: (payload: { message: string }) => void) => () => void
   // Action Recorder / Macros.
   recorderStart: () => Promise<void>
   recorderStop: () => Promise<RecorderAction[]>

@@ -34,6 +34,15 @@ export default function OllamaSuggestion(): JSX.Element | null {
     return off
   }, [])
 
+  // Surface the banner immediately when a free user attempts a coding task
+  // without Ollama running — skip the 2-minute timer in that case.
+  useEffect(() => {
+    const off = window.openui.onOllamaSuggestion(() => {
+      setCardState((prev) => (prev === 'hidden' ? 'visible' : prev))
+    })
+    return off
+  }, [])
+
   const handleSetUp = async (): Promise<void> => {
     console.log('[Telemetry] ollama_prompt_clicked')
     await window.openui.installOllama()
