@@ -143,7 +143,7 @@ jobs:
           name: macos-build
           path: |
             dist/*.dmg
-            dist/*.yml
+            dist/latest*.yml
             dist/*.blockmap
           if-no-files-found: warn
 
@@ -156,7 +156,7 @@ jobs:
           name: windows-build
           path: |
             dist/*.exe
-            dist/*.yml
+            dist/latest*.yml
             dist/*.blockmap
           if-no-files-found: warn
 
@@ -190,10 +190,10 @@ jobs:
         with:
           files: |
             ./artifacts/mac/*.dmg
-            ./artifacts/mac/*.yml
+            ./artifacts/mac/latest*.yml
             ./artifacts/mac/*.blockmap
             ./artifacts/win/*.exe
-            ./artifacts/win/*.yml
+            ./artifacts/win/latest*.yml
             ./artifacts/win/*.blockmap
           generate_release_notes: true
           draft: false
