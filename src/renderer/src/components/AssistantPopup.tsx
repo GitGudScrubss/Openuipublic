@@ -144,10 +144,11 @@ export default function AssistantPopup({
 
     const offDone = window.openui.onDone((result) => {
       streamingRef.current = false
-      // Replace the streamed bubble with the authoritative clean final text so
-      // no streaming artifacts (or leaked JSON) can survive on screen.
+      // Reconcile: the streamed bubble may hold transient tool-call JSON or
+      // intermediate turns. Replace it with the authoritative clean final text
+      // the agent settled on so no streaming artifacts (or leaked JSON) survive.
       const finalText = result?.text ?? ''
-      if (finalText) {
+      if (finalText.trim()) {
         setMessages((prev) => {
           if (prev.length === 0) return prev
           const next = prev.slice()
