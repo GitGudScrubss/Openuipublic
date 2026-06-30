@@ -16,6 +16,9 @@ import ConversationList from './ConversationList'
 
 type HistoryMsg = { role: string; content: string | null; created_at: number }
 
+/** A single turn rendered in the live conversation thread. */
+type ChatMsg = { role: 'user' | 'assistant'; content: string }
+
 type VoiceState = 'idle' | 'recording' | 'transcribing' | 'processing' | 'done'
 
 interface Props {
@@ -36,6 +39,24 @@ function pickMimeType(): string {
   return candidates.find((t) => MediaRecorder.isTypeSupported(t)) ?? ''
 }
 
+/**
+ * Defence-in-depth display sanitiser. The StreamGate in the main process already
+ * withholds tool-call JSON from the UI, but if anything slips through (a model
+ * mis-classification, a wrapped call) we never want raw JSON or the internal
+ * "TOOL RESULT" prefix to reach the user. Returns the user-facing text, or '' if
+ * the whole message was machine plumbing.
+ */
+function cleanAssistantText(text: string): string {
+  let t = text
+  // Drop a parroted internal result prefix the model sometimes echoes back.
+  t = t.replace(/^\s*TOOL RESULT\b[^\n]*\n?/i, '')
+  const trimmed = t.trim()
+  // Hide a message that is (or is becoming) a raw tool-call JSON object.
+  if (trimmed.startsWith('{') && /"(tool|tool_name|name)"\s*:/.test(trimmed)) return ''
+  if (trimmed.startsWith('```') && /"(tool|tool_name|name)"\s*:/.test(trimmed)) return ''
+  return t
+}
+
 export default function AssistantPopup({
   recordingRef,
   captionLockedRef,
@@ -44,14 +65,17 @@ export default function AssistantPopup({
 }: Props): JSX.Element {
   const { tier } = useAuth()
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
-  const [transcript, setTranscript] = useState<string | null>(null)
   const [inputText, setInputText] = useState('')
   const initialSentRef = useRef(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showLocalAIToast, setShowLocalAIToast] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
-  const [historyMessages, setHistoryMessages] = useState<HistoryMsg[] | null>(null)
   const [activeConvId, setActiveConvId] = useState<string | null>(null)
+  // The live conversation thread for the current session — every user and
+  // assistant turn, accumulated so the UI is a real chat, not a single caption.
+  const [messages, setMessages] = useState<ChatMsg[]>([])
+  // True while the assistant is streaming into the last message of `messages`.
+  const streamingRef = useRef(false)
   // 👍/👎 on the last response (self-improvement loop). Null until the user
   // rates; reset to null whenever a new turn starts.
   const [feedbackGiven, setFeedbackGiven] = useState<null | 'up' | 'down'>(null)
@@ -67,6 +91,7 @@ export default function AssistantPopup({
   // GSAP and rAF writes don't conflict with React's reconciler.
   const captionRef = useRef<HTMLDivElement>(null)
   const soundBarsRef = useRef<HTMLDivElement>(null)
+  const threadEndRef = useRef<HTMLDivElement>(null)
 
   // Recording infrastructure
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -76,23 +101,76 @@ export default function AssistantPopup({
   const streamRef = useRef<MediaStream | null>(null)
   const animFrameRef = useRef<number | null>(null)
 
-  // Write to #caption-text imperatively so GSAP doesn't fight React.
+  // Write to #caption-text imperatively so GSAP doesn't fight React (hero only).
   const setCaption = useCallback((text: string): void => {
     if (captionRef.current) captionRef.current.textContent = text
   }, [])
 
+  /** Append a streamed delta to the last (assistant) message in the thread. */
+  const appendToLastAssistant = useCallback((delta: string): void => {
+    setMessages((prev) => {
+      if (prev.length === 0) return prev
+      const next = prev.slice()
+      const last = next[next.length - 1]
+      if (last.role !== 'assistant') return prev
+      next[next.length - 1] = { ...last, content: last.content + delta }
+      return next
+    })
+  }, [])
+
+  /** Open a fresh user→assistant turn in the thread, ready to stream into. */
+  const beginTurn = useCallback((userText: string): void => {
+    setMessages((prev) => [...prev, { role: 'user', content: userText }, { role: 'assistant', content: '' }])
+    streamingRef.current = true
+    setFeedbackGiven(null)
+    setVoiceState('processing')
+  }, [])
+
+  // Keep the thread scrolled to the newest message.
+  useEffect(() => {
+    threadEndRef.current?.scrollIntoView({ block: 'end' })
+  }, [messages])
+
   // ── IPC event listeners (mounted once) ────────────────────────────────
   useEffect(() => {
     const offChunk = window.openui.onChunk((delta) => {
-      // Append streaming tokens directly to the DOM — no state update needed.
-      if (captionRef.current) captionRef.current.textContent += delta
+      if (streamingRef.current) {
+        appendToLastAssistant(delta)
+      } else if (captionRef.current) {
+        // Hero/demo fallback — stream into the caption when no thread turn is open.
+        captionRef.current.textContent += delta
+      }
     })
 
-    const offDone = window.openui.onDone(() => {
+    const offDone = window.openui.onDone((result) => {
+      streamingRef.current = false
+      // Replace the streamed bubble with the authoritative clean final text so
+      // no streaming artifacts (or leaked JSON) can survive on screen.
+      const finalText = result?.text ?? ''
+      if (finalText) {
+        setMessages((prev) => {
+          if (prev.length === 0) return prev
+          const next = prev.slice()
+          const last = next[next.length - 1]
+          if (last.role === 'assistant') next[next.length - 1] = { ...last, content: finalText }
+          return next
+        })
+      }
       setVoiceState('done')
     })
 
     const offError = window.openui.onError((msg) => {
+      streamingRef.current = false
+      setMessages((prev) => {
+        if (prev.length === 0) return prev
+        const next = prev.slice()
+        const last = next[next.length - 1]
+        if (last.role === 'assistant' && last.content === '') {
+          next[next.length - 1] = { ...last, content: `⚠️ ${msg}` }
+          return next
+        }
+        return prev
+      })
       setCaption(`Error: ${msg}`)
       setVoiceState('idle')
       captionLockedRef.current = false
@@ -100,10 +178,9 @@ export default function AssistantPopup({
 
     // Fired by main process after Whisper returns, before the agent streams.
     const offTranscript = window.openui.onTranscript((text) => {
-      setTranscript(text)
-      setVoiceState('processing')
-      setFeedbackGiven(null) // new turn → allow rating the upcoming response
-      setCaption('') // clear so onChunk can stream into a blank caption
+      beginTurn(text)
+      captionLockedRef.current = true
+      setCaption('')
     })
 
     // Fired by the 60-second Ollama polling loop when local AI comes online.
@@ -119,30 +196,22 @@ export default function AssistantPopup({
       offTranscript()
       offLocalAI()
     }
-  }, [setCaption, captionLockedRef])
+  }, [setCaption, captionLockedRef, appendToLastAssistant, beginTurn])
 
-  // ── Caption text for each voice state ─────────────────────────────────
+  // ── Caption text for each voice state (hero state only) ────────────────
   useEffect(() => {
     switch (voiceState) {
       case 'recording':
         captionLockedRef.current = true
-        setCaption('Recording…')
+        if (messages.length === 0) setCaption('Recording…')
         break
       case 'transcribing':
-        setCaption('Transcribing…')
+        if (messages.length === 0) setCaption('Transcribing…')
         break
-      case 'processing':
-        // Caption is cleared when onTranscript fires; onChunk fills it.
-        break
-      case 'done':
-        // Caption holds the streaming response; leave it as-is.
-        break
-      case 'idle':
-        // Release the lock so the GSAP demo typewriter can restart on next
-        // mount (or just stays at its last value between interactions).
+      default:
         break
     }
-  }, [voiceState, setCaption, captionLockedRef])
+  }, [voiceState, setCaption, captionLockedRef, messages.length])
 
   // ── Cleanup on unmount ─────────────────────────────────────────────────
   useEffect(() => {
@@ -229,12 +298,11 @@ export default function AssistantPopup({
         const blob = new Blob(audioChunksRef.current, { type: effectiveMime })
         const arrayBuffer = await blob.arrayBuffer()
 
-        setTranscript(null)
-
         // Blocks until Whisper + the full agent turn complete.
         // onTranscript / onChunk / onDone / onError update the UI as they fire.
         await window.openui.transcribeAndChat(arrayBuffer, effectiveMime, tier)
       } catch {
+        streamingRef.current = false
         setVoiceState('idle')
         captionLockedRef.current = false
       }
@@ -243,16 +311,18 @@ export default function AssistantPopup({
     recorder.start(200)
     mediaRecorderRef.current = recorder
     setVoiceState('recording')
-  }, [voiceState, recordingRef, captionLockedRef, setCaption])
+  }, [voiceState, recordingRef, captionLockedRef, setCaption, tier, onPermissionNeeded])
 
   // ── History sidebar handlers ──────────────────────────────────────────
   const handleNewChat = useCallback(() => {
     window.openui.clearHistory()
-    setHistoryMessages(null)
+    streamingRef.current = false
+    setMessages([])
     setActiveConvId(null)
     setShowHistory(false)
-    setTranscript(null)
     setVoiceState('idle')
+    setInputText('')
+    setFeedbackGiven(null)
     setCaption('')
     captionLockedRef.current = false
   }, [setCaption, captionLockedRef])
@@ -263,13 +333,15 @@ export default function AssistantPopup({
       setShowHistory(false)
       try {
         const msgs = await window.openui.resumeConversation(id)
-        const thread = msgs.filter((m) => m.role === 'user' || m.role === 'assistant')
-        setHistoryMessages(thread)
-        setTranscript(null)
-        captionLockedRef.current = false
+        const thread: ChatMsg[] = (msgs as HistoryMsg[])
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content ?? '' }))
+        streamingRef.current = false
+        setMessages(thread)
+        captionLockedRef.current = true
         setVoiceState('idle')
       } catch {
-        setHistoryMessages(null)
+        setMessages([])
       }
     },
     [captionLockedRef]
@@ -283,23 +355,19 @@ export default function AssistantPopup({
       if (voiceState === 'recording' || voiceState === 'processing' || voiceState === 'transcribing')
         return
 
-      // Exit thread view so streaming response lands in the caption area.
-      setHistoryMessages(null)
-      setTranscript(trimmed)
-      setInputText('')
       captionLockedRef.current = true
-      setVoiceState('processing')
-      setFeedbackGiven(null) // new turn → allow rating the upcoming response
-      setCaption('')
+      setInputText('')
+      beginTurn(trimmed)
 
       try {
         await window.openui.chat(trimmed, tier)
       } catch {
+        streamingRef.current = false
         setVoiceState('idle')
         captionLockedRef.current = false
       }
     },
-    [voiceState, captionLockedRef, setCaption]
+    [voiceState, captionLockedRef, beginTurn, tier]
   )
 
   // ── Rate the last response (self-improvement loop) ──────────────────────
@@ -319,6 +387,9 @@ export default function AssistantPopup({
 
   const isRecording = voiceState === 'recording'
   const isBusy = voiceState === 'transcribing' || voiceState === 'processing'
+  // The hero (big mic orb) shows only on a blank, idle session; once a chat is
+  // under way we switch to the scrolling conversation thread.
+  const showHero = messages.length === 0
 
   return (
     <div id="openui-popup" style={{ overflow: 'hidden' }}>
@@ -333,7 +404,7 @@ export default function AssistantPopup({
           zIndex: 100,
           transform: showHistory ? 'translateX(0)' : 'translateX(-100%)',
           transition: 'transform 0.24s cubic-bezier(0.4,0,0.2,1)',
-          background: 'rgba(18,18,22,0.96)',
+          background: 'rgba(10,10,12,0.98)',
           backdropFilter: 'blur(20px)',
           WebkitBackdropFilter: 'blur(20px)',
           borderRight: '1px solid rgba(255,255,255,0.08)',
@@ -399,13 +470,51 @@ export default function AssistantPopup({
           <div className="popup-orb">
             <div className="popup-orb-dot" />
           </div>
-          <span style={{ fontSize: 14, fontWeight: 600, color: '#1c1c1e', letterSpacing: '-.02em' }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ou-text)', letterSpacing: '-.02em' }}>
             OpenUI
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <UsageCounter />
           <SubscriptionStatus />
+          {/* New chat — quick reset without opening the sidebar */}
+          <button
+            type="button"
+            aria-label="New chat"
+            title="New chat"
+            onClick={handleNewChat}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 26,
+              height: 26,
+              borderRadius: 7,
+              border: 'none',
+              background: 'transparent',
+              cursor: 'pointer',
+              color: '#8e8e93',
+              padding: 0,
+              transition: 'background 0.15s, color 0.15s',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'var(--ou-surface-2)'
+              e.currentTarget.style.color = 'var(--ou-text)'
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent'
+              e.currentTarget.style.color = '#8e8e93'
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M12 5v14M5 12h14"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
           <button
             type="button"
             aria-label="History"
@@ -473,7 +582,7 @@ export default function AssistantPopup({
                   height: 5,
                   borderRadius: '50%',
                   background: '#34c759',
-                  border: '1px solid rgba(255,255,255,0.9)',
+                  border: '1px solid rgba(0,0,0,0.6)',
                 }}
               />
             )}
@@ -505,62 +614,42 @@ export default function AssistantPopup({
         />
       )}
 
-      {/* Thread view — shown when a past conversation is loaded */}
-      {historyMessages !== null && (
-        <div
-          style={{
-            maxHeight: 300,
-            overflowY: 'auto',
-            padding: '10px 14px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-            borderBottom: '1px solid rgba(0,0,0,0.06)',
-          }}
-        >
-          {historyMessages.map((msg, i) => (
-            <div
-              key={i}
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                gap: 2,
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 10,
-                  color: '#aeaeb2',
-                  fontFamily: '-apple-system, sans-serif',
-                }}
-              >
-                {msg.role === 'user' ? 'You' : 'AI'}
-              </span>
-              <div
-                style={{
-                  maxWidth: '85%',
-                  background:
-                    msg.role === 'user' ? 'rgba(167,139,250,0.12)' : 'rgba(0,0,0,0.05)',
-                  borderRadius:
-                    msg.role === 'user' ? '10px 10px 2px 10px' : '10px 10px 10px 2px',
-                  padding: '6px 10px',
-                  fontSize: 12,
-                  color: '#1c1c1e',
-                  fontFamily: '-apple-system, sans-serif',
-                  lineHeight: 1.45,
-                  wordBreak: 'break-word',
-                }}
-              >
-                {msg.content ?? ''}
+      {/* Live conversation thread — the real, working chat view */}
+      {!showHero && (
+        <div className="ou-thread">
+          {messages.map((msg, i) => {
+            const isLast = i === messages.length - 1
+            const isStreaming = isLast && msg.role === 'assistant' && voiceState === 'processing'
+            if (msg.role === 'user') {
+              return (
+                <div className="ou-msg" key={i}>
+                  <span className="ou-msg-role" style={{ alignSelf: 'flex-end' }}>
+                    You
+                  </span>
+                  <div className="ou-bubble user">{msg.content}</div>
+                </div>
+              )
+            }
+            const display = cleanAssistantText(msg.content)
+            return (
+              <div className="ou-msg" key={i}>
+                <span className="ou-msg-role">OpenUI</span>
+                <div className={`ou-bubble ai${isStreaming ? ' ou-caret' : ''}`}>
+                  {display || (isStreaming ? 'Working…' : '')}
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
+
+          {/* Was-this-helpful rating — feeds the local self-improvement loop. */}
+          {voiceState === 'done' && <FeedbackButtons given={feedbackGiven} onRate={rate} />}
+
+          <div ref={threadEndRef} />
         </div>
       )}
 
-      {/* Mic stage — hidden while a loaded thread is displayed */}
-      <div className="mic-stage" style={{ display: historyMessages !== null ? 'none' : undefined }}>
+      {/* Mic stage (hero) — shown only on a blank, idle session */}
+      <div className="mic-stage" style={{ display: showHero ? undefined : 'none' }}>
         <div id="ring-1" className="mic-ring" />
         <div id="ring-2" className="mic-ring" />
         <div id="ring-3" className="mic-ring" />
@@ -615,19 +704,6 @@ export default function AssistantPopup({
             <div className="sbar" style={{ height: 12 }} id="sb8" />
           </div>
         </div>
-
-        {/* Was-this-helpful rating — feeds the local self-improvement loop. */}
-        {voiceState === 'done' && historyMessages === null && (
-          <FeedbackButtons given={feedbackGiven} onRate={rate} />
-        )}
-      </div>
-
-      {/* Transcript bubble — shows what the user said while the agent replies */}
-      <div
-        id="transcript-bubble"
-        style={{ display: transcript !== null ? '' : 'none' }}
-      >
-        <p id="transcript-text">{transcript ?? ''}</p>
       </div>
 
       {/* Ollama suggestion card — shown 2 min after mount if Ollama is absent */}
@@ -640,7 +716,7 @@ export default function AssistantPopup({
           height="14"
           viewBox="0 0 24 24"
           fill="none"
-          style={{ color: '#aeaeb2', flexShrink: 0 }}
+          style={{ color: 'var(--ou-text-faint)', flexShrink: 0 }}
         >
           <circle cx="11" cy="11" r="8" stroke="currentColor" strokeWidth="2" />
           <path d="m21 21-4.35-4.35" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
@@ -656,7 +732,7 @@ export default function AssistantPopup({
           disabled={isBusy || isRecording}
           style={{
             fontSize: 13,
-            color: '#1c1c1e',
+            color: 'var(--ou-text)',
             flex: 1,
             fontFamily: '-apple-system, sans-serif',
             background: 'none',
@@ -665,23 +741,48 @@ export default function AssistantPopup({
             opacity: isBusy || isRecording ? 0.4 : 1
           }}
         />
-        <kbd style={{ fontSize: 11, color: '#c7c7cc', fontFamily: '-apple-system, sans-serif' }}>
-          ⌘K
-        </kbd>
+        {/* Compact mic — keeps voice reachable once we're in the chat thread */}
+        <button
+          type="button"
+          aria-label={isRecording ? 'Stop recording' : 'Start voice input'}
+          title={isRecording ? 'Stop recording' : 'Voice input'}
+          onClick={isBusy ? undefined : handleMicClick}
+          disabled={isBusy}
+          className={`ou-input-mic${isRecording ? ' recording' : ''}`}
+        >
+          {isRecording ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+              <rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" />
+            </svg>
+          ) : (
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+              <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" />
+              <path
+                d="M5 10c0 3.866 3.134 7 7 7s7-3.134 7-7"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+              />
+              <line x1="12" y1="19" x2="12" y2="22" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          )}
+        </button>
       </div>
 
-      {/* Suggestion chips */}
-      <div className="chips-row">
-        <div className="chip" onClick={() => handleSend('Check my emails')}>
-          📧 Check email
+      {/* Suggestion chips — only on the empty hero state */}
+      {showHero && (
+        <div className="chips-row">
+          <div className="chip" onClick={() => handleSend('Check my emails')}>
+            📧 Check email
+          </div>
+          <div className="chip" onClick={() => handleSend('Schedule an event')}>
+            📅 Schedule event
+          </div>
+          <div className="chip" onClick={() => handleSend('Find a file')}>
+            📁 Find file
+          </div>
         </div>
-        <div className="chip" onClick={() => handleSend('Schedule an event')}>
-          📅 Schedule event
-        </div>
-        <div className="chip" onClick={() => handleSend('Find a file')}>
-          📁 Find file
-        </div>
-      </div>
+      )}
 
       {showSettings && (
         <SettingsModal

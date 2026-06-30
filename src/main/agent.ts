@@ -102,6 +102,8 @@ The very first character of a tool-call message MUST be "{". Do not say things l
 
 After each tool runs you will receive a message starting with "TOOL RESULT" describing what happened. Use it to decide the next step. Chain as many tool calls as the task needs — one per message. When the task is complete, reply to the user in plain natural language (never wrap your final answer in JSON).
 
+IMPORTANT: "TOOL RESULT" is an internal system prefix. NEVER write the words "TOOL RESULT" in a reply to the user, and never quote or paraphrase the raw result line back to them. Just tell the user, in your own words, what you did (e.g. "Done — I opened that folder for you.").
+
 Available tools:
 ${allSchemas.map(renderSchema).join('\n')}
 
@@ -275,19 +277,28 @@ function extractFirstJsonObject(text: string): string | null {
   return null // unbalanced — likely a still-streaming fragment
 }
 
+/** Set of every tool name the agent can actually execute (built-in + MCP). */
+function knownToolNames(): Set<string> {
+  return new Set([...toolSchemas, ...getMcpToolSchemas()].map((s) => s.name))
+}
+
 /**
  * Parse a model response into a tool call, or null for a natural-language answer.
  *
  * Robust by design — real models (especially local Ollama models) wrap calls in
- * markdown fences, add leading/trailing whitespace, or append a trailing newline.
- * We therefore:
+ * markdown fences, add leading/trailing whitespace, prepend a chatty preamble
+ * ("Sure, I'll do that: {…}"), or append a trailing newline. We therefore:
  *   1. unwrap a surrounding ```json … ``` / ``` … ``` code fence,
- *   2. require the result to be tool-SHAPED (begins with a JSON object) so a
- *      natural-language answer that merely *mentions* JSON is never executed —
- *      this mirrors StreamGate, which withholds exactly these shapes from the UI,
- *   3. extract the first balanced {...} (tolerating trailing prose), and
- *   4. accept the common field aliases models emit (tool/name/tool_name,
- *      args/arguments/parameters/input).
+ *   2. extract the first balanced {...} (tolerating prose before AND after it),
+ *   3. accept the common field aliases models emit (tool/name/tool_name,
+ *      args/arguments/parameters/input), and
+ *   4. when the JSON was NOT the very first thing in the message (i.e. the model
+ *      wrapped it in prose), only treat it as a call if the tool name is one we
+ *      can actually run — so a natural-language answer that merely *mentions* a
+ *      JSON object is never executed by mistake.
+ *
+ * Step 4 is the fix for "the model printed JSON but nothing happened": a wrapped
+ * tool call now still executes instead of leaking to the screen as dead text.
  */
 export function parseToolCall(text: string): ToolCall | null {
   if (!text) return null
@@ -297,8 +308,9 @@ export function parseToolCall(text: string): ToolCall | null {
   const fence = candidate.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
   if (fence) candidate = fence[1].trim()
 
-  // Only tool-shaped responses are ever executed (see step 2 above).
-  if (!candidate.startsWith('{')) return null
+  // Whether the JSON object is the very first non-whitespace content. Strict
+  // calls (start with "{") are trusted as-is; wrapped calls must name a real tool.
+  const strict = candidate.startsWith('{')
 
   const jsonText = extractFirstJsonObject(candidate)
   if (!jsonText) return null
@@ -314,13 +326,19 @@ export function parseToolCall(text: string): ToolCall | null {
   const obj = parsed as Record<string, unknown>
   const toolRaw = obj.tool ?? obj.tool_name ?? obj.name
   if (typeof toolRaw !== 'string' || !toolRaw.trim()) return null
+  const tool = toolRaw.trim()
+
+  // Prose-wrapped JSON is only honoured for tools we can really execute. This
+  // keeps false positives out while still rescuing a real call the model buried
+  // inside a sentence.
+  if (!strict && !knownToolNames().has(tool)) return null
 
   const argsRaw = obj.args ?? obj.arguments ?? obj.parameters ?? obj.input
   const args =
     typeof argsRaw === 'object' && argsRaw !== null && !Array.isArray(argsRaw)
       ? (argsRaw as Record<string, unknown>)
       : {}
-  return { tool: toolRaw.trim(), args }
+  return { tool, args }
 }
 
 /**
