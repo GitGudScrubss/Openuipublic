@@ -100,10 +100,24 @@ You can control the operating system by calling tools. To call a tool, respond w
 
 The very first character of a tool-call message MUST be "{". Do not say things like "Sure, I'll do that" before the JSON, and never wrap it in markdown code fences (no triple-backtick blocks).
 
-After each tool runs you will receive a message starting with "TOOL RESULT" describing what happened. Use it to decide the next step. Chain as many tool calls as the task needs — one per message. When the task is complete, reply to the user in plain natural language (never wrap your final answer in JSON).
+After each tool runs you (and ONLY you) will receive a message starting with "TOOL RESULT" describing what actually happened. Use it to decide the next step. Chain as many tool calls as the task needs — one per message. When the task is complete, reply to the user in plain natural language (never wrap your final answer in JSON).
+
+CRITICAL RULES — these are the difference between working and broken:
+- To DO anything on the computer (open an app/folder, search files, browse the web, edit the calendar) you MUST emit the tool-call JSON. Describing the action in words does NOT perform it.
+- NEVER write a line that starts with "TOOL RESULT" yourself — that text only ever comes from the system after a real tool runs. If you write it, the action never happened.
+- NEVER invent or describe results you have not received: do not claim a folder "has been opened", do not fabricate file paths or search results, do not say a page "has navigated". Call the tool and wait for the real TOOL RESULT.
+- You are NOT "just a menu-bar app that can't open files". You CAN control this computer through the tools below. Use them.
+- A tool call is the WHOLE message: the first character is "{" and there is nothing before or after it.
 
 Available tools:
 ${allSchemas.map(renderSchema).join('\n')}
+
+Examples — map the request to a single tool-call message (emit ONLY the JSON):
+- "open the OpenUI folder" / "open Downloads" → {"tool": "open_app", "args": {"appName": "C:\\\\Users\\\\You\\\\Downloads"}}
+- "open Spotify" / "launch Chrome" → {"tool": "open_app", "args": {"appName": "Spotify"}}
+- "find a file named report" / "search my files for budget" → {"tool": "search_files", "args": {"query": "report"}}
+- "check my email" / "open Gmail in the browser" → {"tool": "browser_navigate", "args": {"url": "https://mail.google.com/"}}
+- "schedule a meeting tomorrow at 3pm" → {"tool": "control_calendar", "args": {"action": "create", "eventDetails": {"title": "Meeting", "start": "2025-01-01T15:00:00"}}}
 
 Browser automation workflow — use this for ALL web-based tasks (booking flights, scraping websites, filling web forms, reading prices, searching the web). Playwright targets elements directly by CSS selector: faster, more reliable, and more precise than pixel-coordinate clicking:
 1. Call browser_navigate(url) — opens the URL in a visible Chromium window the user can watch.
@@ -275,19 +289,54 @@ function extractFirstJsonObject(text: string): string | null {
   return null // unbalanced — likely a still-streaming fragment
 }
 
+/** All tool names the agent can actually execute (built-in + MCP). */
+function knownToolNames(): Set<string> {
+  const names = new Set<string>()
+  for (const s of toolSchemas) names.add(s.name)
+  for (const s of getMcpToolSchemas()) names.add(s.name)
+  return names
+}
+
+/**
+ * Coerce a parsed JSON object into a ToolCall, accepting the field aliases real
+ * models emit (tool/name/tool_name, args/arguments/parameters/input). Returns
+ * null when it isn't tool-shaped. When `requireKnown` is set, the tool name must
+ * match a real registered tool — used for the embedded-scan path so prose that
+ * merely contains a JSON object isn't mistaken for a tool call.
+ */
+function objToToolCall(parsed: unknown, requireKnown: boolean): ToolCall | null {
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+  const obj = parsed as Record<string, unknown>
+  const toolRaw = obj.tool ?? obj.tool_name ?? obj.name
+  if (typeof toolRaw !== 'string' || !toolRaw.trim()) return null
+  const tool = toolRaw.trim()
+  if (requireKnown && !knownToolNames().has(tool)) return null
+
+  const argsRaw = obj.args ?? obj.arguments ?? obj.parameters ?? obj.input
+  const args =
+    typeof argsRaw === 'object' && argsRaw !== null && !Array.isArray(argsRaw)
+      ? (argsRaw as Record<string, unknown>)
+      : {}
+  return { tool, args }
+}
+
 /**
  * Parse a model response into a tool call, or null for a natural-language answer.
  *
- * Robust by design — real models (especially local Ollama models) wrap calls in
- * markdown fences, add leading/trailing whitespace, or append a trailing newline.
- * We therefore:
- *   1. unwrap a surrounding ```json … ``` / ``` … ``` code fence,
- *   2. require the result to be tool-SHAPED (begins with a JSON object) so a
- *      natural-language answer that merely *mentions* JSON is never executed —
- *      this mirrors StreamGate, which withholds exactly these shapes from the UI,
- *   3. extract the first balanced {...} (tolerating trailing prose), and
- *   4. accept the common field aliases models emit (tool/name/tool_name,
- *      args/arguments/parameters/input).
+ * Robust by design — real models (especially local Ollama models) rarely follow
+ * the "respond with ONLY raw JSON" contract. They wrap calls in markdown fences,
+ * prepend chatty prose ("Sure, I'll do that: {...}"), or even hallucinate a fake
+ * "TOOL RESULT: …" sentence with the real call buried after it. We recover the
+ * call in two passes:
+ *
+ *   1. Fast path — the message is tool-shaped (optionally fenced, then begins
+ *      with `{`). Any tool name is accepted here so an unknown/typo'd name still
+ *      routes through executeTool → the MCP fallback, preserving prior behaviour.
+ *   2. Embedded path — otherwise, scan the whole message for the FIRST balanced
+ *      JSON object whose tool field names a REAL registered tool. The
+ *      known-tool requirement is what makes this safe: a natural-language answer
+ *      that merely mentions JSON, or contains an unrelated `{...}`, is never
+ *      executed. This is what rescues "prose then {tool json}" responses.
  */
 export function parseToolCall(text: string): ToolCall | null {
   if (!text) return null
@@ -297,30 +346,36 @@ export function parseToolCall(text: string): ToolCall | null {
   const fence = candidate.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
   if (fence) candidate = fence[1].trim()
 
-  // Only tool-shaped responses are ever executed (see step 2 above).
-  if (!candidate.startsWith('{')) return null
-
-  const jsonText = extractFirstJsonObject(candidate)
-  if (!jsonText) return null
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(jsonText)
-  } catch {
-    return null // not valid JSON — treat as natural language
+  // ── Pass 1: clean leading JSON (the contract the prompt asks for) ──────────
+  if (candidate.startsWith('{')) {
+    const jsonText = extractFirstJsonObject(candidate)
+    if (jsonText) {
+      try {
+        const call = objToToolCall(JSON.parse(jsonText), false)
+        if (call) return call
+      } catch {
+        /* fall through to the embedded scan */
+      }
+    }
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
 
-  const obj = parsed as Record<string, unknown>
-  const toolRaw = obj.tool ?? obj.tool_name ?? obj.name
-  if (typeof toolRaw !== 'string' || !toolRaw.trim()) return null
+  // ── Pass 2: recover a tool call embedded in prose/fences anywhere in text ──
+  // Scan every `{` position; the first balanced object that names a known tool
+  // wins. Bounded by the number of `{` characters, so it's cheap.
+  for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
+    const jsonText = extractFirstJsonObject(text.slice(start))
+    if (!jsonText) continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(jsonText)
+    } catch {
+      continue // unbalanced or invalid here — try the next `{`
+    }
+    const call = objToToolCall(parsed, true)
+    if (call) return call
+  }
 
-  const argsRaw = obj.args ?? obj.arguments ?? obj.parameters ?? obj.input
-  const args =
-    typeof argsRaw === 'object' && argsRaw !== null && !Array.isArray(argsRaw)
-      ? (argsRaw as Record<string, unknown>)
-      : {}
-  return { tool: toolRaw.trim(), args }
+  return null
 }
 
 /**
@@ -340,6 +395,8 @@ export function parseToolCall(text: string): ToolCall | null {
 export class StreamGate {
   private buffer = ''
   private decided: 'tool' | 'text' | null = null
+  /** Chars of `buffer` already forwarded to the UI (text mode only). */
+  private forwardedLen = 0
 
   constructor(private readonly forward: (delta: string) => void) {}
 
@@ -348,40 +405,56 @@ export class StreamGate {
     if (!delta) return
     this.buffer += delta
 
-    if (this.decided === 'text') {
-      this.forward(delta)
-      return
-    }
-    if (this.decided === 'tool') return // keep withholding
+    if (this.decided === 'tool') return // pure tool JSON — keep withholding entirely
 
-    // Undecided: inspect the leading non-whitespace character(s).
-    const lead = this.buffer.replace(/^\s+/, '')
-    if (lead === '') return // only whitespace so far — wait for more
-
-    if (lead[0] === '`') {
-      // Possibly the start of a ``` code fence — wait until we can be sure.
-      if (lead.length < 3) return
-      this.decided = 'tool'
-      return
-    }
-    if (lead[0] === '{') {
-      this.decided = 'tool'
-      return
+    if (this.decided === null) {
+      // Inspect the leading non-whitespace character(s) to classify the response.
+      const lead = this.buffer.replace(/^\s+/, '')
+      if (lead === '') return // only whitespace so far — wait for more
+      if (lead[0] === '`') {
+        // Possibly the start of a ``` code fence — wait until we can be sure.
+        if (lead.length < 3) return
+        this.decided = 'tool'
+        return
+      }
+      if (lead[0] === '{') {
+        this.decided = 'tool'
+        return
+      }
+      this.decided = 'text' // natural language — fall through to incremental flush
     }
 
-    // Natural language → flush everything buffered so far, then stream live.
-    this.decided = 'text'
-    this.forward(this.buffer)
+    // Text mode: stream live, but never reveal a JSON tail. Models often append
+    // a tool call AFTER chatty prose ("Okay! {\"tool\":…}"); we forward only up
+    // to the first `{` and hold the rest until finalize decides whether it was a
+    // real tool call (dropped) or just a stray brace in prose (flushed).
+    this.flushTextUpToJson()
+  }
+
+  /** Forward buffered text up to (but not including) the first `{`. */
+  private flushTextUpToJson(): void {
+    const brace = this.buffer.indexOf('{', this.forwardedLen)
+    const safeEnd = brace === -1 ? this.buffer.length : brace
+    if (safeEnd > this.forwardedLen) {
+      this.forward(this.buffer.slice(this.forwardedLen, safeEnd))
+      this.forwardedLen = safeEnd
+    }
   }
 
   /**
-   * Call once the full response is known and classified by the agent. When we
-   * withheld output that turned out NOT to be a real tool call, flush it now so
-   * the user still sees the answer.
+   * Call once the full response is known and classified by the agent.
+   *   • tool-shaped but NOT a real call → reveal everything (false positive);
+   *   • text with a held JSON tail that WASN'T a tool call → reveal the tail;
+   *   • text with a held tail that WAS a tool call → leave it hidden (dropped).
    */
   finalize(isToolCall: boolean): void {
-    if (!isToolCall && this.decided === 'tool') {
-      this.forward(this.buffer)
+    if (this.decided === 'tool') {
+      if (!isToolCall) this.forward(this.buffer)
+      return
+    }
+    if (this.decided === 'text' && !isToolCall && this.forwardedLen < this.buffer.length) {
+      this.forward(this.buffer.slice(this.forwardedLen))
+      this.forwardedLen = this.buffer.length
     }
   }
 }
