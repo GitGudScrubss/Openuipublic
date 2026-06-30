@@ -11,6 +11,7 @@ import {
   isOllamaRunning,
   isCloudProxyConfigured,
   callCloudProxy,
+  CloudProxyError,
   classifyTaskComplexity,
   emitLocalUsage
 } from './cloudFreeTier'
@@ -624,7 +625,26 @@ async function routeCloudOrDirect(
   onDelta: (delta: string) => void
 ): Promise<string> {
   if (isCloudProxyConfigured()) {
-    return callCloudProxy(win, tier, messages, systemPrompt, modelKey, onDelta)
+    try {
+      return await callCloudProxy(win, tier, messages, systemPrompt, modelKey, onDelta)
+    } catch (err) {
+      // Anything other than a cloud-proxy server failure (network, programming
+      // error) propagates unchanged.
+      if (!(err instanceof CloudProxyError)) throw err
+      // The proxy is down (typically a server-side LLM key/credit problem). The
+      // failure is detected BEFORE any token is streamed, so nothing has reached
+      // the UI yet and it is safe to retry the turn against a local model. This
+      // keeps the app usable even when the cloud backend is broken — critical so
+      // a single server dependency can't take the whole product offline.
+      console.error(
+        `[agent] cloud proxy unavailable (HTTP ${err.status}${err.code ? `, ${err.code}` : ''}) — trying local fallback`
+      )
+      const recovered = await tryLocalModelFallback(win, tier, messages, systemPrompt, onDelta)
+      if (recovered !== null) return recovered
+      // No local model available either — surface the friendly proxy message.
+      onDelta(err.message)
+      return err.message
+    }
   }
 
   // ── Local-dev / unauthenticated fallback (direct API keys) ──────────────────
@@ -650,6 +670,37 @@ async function routeCloudOrDirect(
     onDelta(msg)
     return msg
   }
+}
+
+/**
+ * Last-resort local model when the cloud proxy is unreachable (e.g. its
+ * server-side LLM key is missing/out of credit). Tries a direct provider call
+ * if a local key is present, otherwise a running Ollama. Returns the assistant
+ * text, or `null` when no local option exists so the caller can surface the
+ * original cloud message. Never throws — a failed Ollama attempt resolves null.
+ */
+async function tryLocalModelFallback(
+  win: BrowserWindow,
+  tier: Tier,
+  messages: Message[],
+  systemPrompt: string,
+  onDelta: (delta: string) => void
+): Promise<string | null> {
+  // A direct API key on this machine (dev / self-hosted) beats local Ollama.
+  if (process.env.ANTHROPIC_API_KEY) {
+    emitLocalUsage(win, tier)
+    const model = tier === 'free' ? DIRECT_FREE_MODEL : DIRECT_PRO_MODEL
+    return callAnthropic(win, messages, systemPrompt, model, onDelta)
+  }
+  if (await isOllamaRunning()) {
+    try {
+      emitLocalUsage(win, tier)
+      return await callOllama(win, messages, systemPrompt, onDelta)
+    } catch {
+      return null
+    }
+  }
+  return null
 }
 
 /**
