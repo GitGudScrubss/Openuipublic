@@ -88,7 +88,11 @@ export default function AssistantPopup({
       if (captionRef.current) captionRef.current.textContent += delta
     })
 
-    const offDone = window.openui.onDone(() => {
+    const offDone = window.openui.onDone((result) => {
+      // Reconcile: the streamed caption may hold transient tool-call JSON or
+      // intermediate turns. Replace it with the clean final natural-language
+      // answer the agent settled on so the user never ends on raw JSON.
+      if (result?.text?.trim()) setCaption(result.text)
       setVoiceState('done')
     })
 
