@@ -10,7 +10,6 @@ import UpdateProgress from './UpdateProgress'
 import UpdateReady from './UpdateReady'
 import SettingsModal from './SettingsModal'
 import { useUpdater } from '../hooks/useUpdater'
-import OllamaSuggestion from './OllamaSuggestion'
 import LocalAIStatus from './LocalAIStatus'
 import ConversationList from './ConversationList'
 
@@ -68,7 +67,6 @@ export default function AssistantPopup({
   const [inputText, setInputText] = useState('')
   const initialSentRef = useRef(false)
   const [showSettings, setShowSettings] = useState(false)
-  const [showLocalAIToast, setShowLocalAIToast] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [activeConvId, setActiveConvId] = useState<string | null>(null)
   // On a wide/maximized window the session sidebar is pinned permanently open
@@ -194,18 +192,11 @@ export default function AssistantPopup({
       setCaption('')
     })
 
-    // Fired by the 60-second Ollama polling loop when local AI comes online.
-    const offLocalAI = window.openui.onLocalAIAvailable(() => {
-      setShowLocalAIToast(true)
-      setTimeout(() => setShowLocalAIToast(false), 4000)
-    })
-
     return () => {
       offChunk()
       offDone()
       offError()
       offTranscript()
-      offLocalAI()
     }
   }, [setCaption, captionLockedRef, appendToLastAssistant, beginTurn])
 
@@ -739,9 +730,6 @@ export default function AssistantPopup({
       </div>
       {/* /ou-chatbody */}
 
-      {/* Ollama suggestion card — shown 2 min after mount if Ollama is absent */}
-      <OllamaSuggestion />
-
       {/* Input strip */}
       <div className="input-strip">
         <svg
@@ -832,29 +820,6 @@ export default function AssistantPopup({
 
       {/* Local AI status footer */}
       <LocalAIStatus />
-
-      {/* Toast: shown briefly when Ollama is detected running for the first time */}
-      {showLocalAIToast && (
-        <div
-          style={{
-            position: 'absolute',
-            bottom: 60,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'rgba(28,28,30,0.88)',
-            color: '#fff',
-            fontSize: 12,
-            fontWeight: 500,
-            fontFamily: '-apple-system, sans-serif',
-            borderRadius: 20,
-            padding: '6px 14px',
-            whiteSpace: 'nowrap',
-            pointerEvents: 'none'
-          }}
-        >
-          Local AI detected! Switching to unlimited local mode.
-        </div>
-      )}
     </div>
   )
 }
