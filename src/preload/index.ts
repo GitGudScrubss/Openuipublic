@@ -401,6 +401,21 @@ const api = {
     ipcRenderer.send('openui:hitl:response', { id, approved })
   },
 
+  // ── Plan approval (approve the whole plan once, vs. per-tool HITL) ────────────
+  // Main emits openui:plan:request with the full checklist before executing a
+  // planned task; the renderer shows PlanApprovalModal and calls respondPlan.
+  onPlanRequest: (
+    cb: (payload: { id: string; summary: string; steps: { id: string; title: string }[] }) => void
+  ): (() => void) => {
+    const fn = wrap<{ id: string; summary: string; steps: { id: string; title: string }[] }>(cb)
+    ipcRenderer.on('openui:plan:request', fn)
+    return (): void => { ipcRenderer.removeListener('openui:plan:request', fn) }
+  },
+
+  respondPlan: (id: string, approved: boolean): void => {
+    ipcRenderer.send('openui:plan:response', { id, approved })
+  },
+
   // ── Action Recorder / Macros ───────────────────────────────────────────────
   recorderStart: (): Promise<void> =>
     ipcRenderer.invoke('openui:recorder:start'),

@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
-import type { ConsentStatus } from '../env'
+import type { AutonomyLevel, ConsentStatus } from '../env'
 import type { UpdateStatus } from '../hooks/useUpdater'
+
+const AUTONOMY_OPTIONS: { value: AutonomyLevel; label: string; hint: string }[] = [
+  { value: 'ask-each', label: 'Ask each', hint: 'Confirm every action before it runs.' },
+  { value: 'approve-plan', label: 'Approve plan', hint: 'Review the plan once, then it runs on its own.' },
+  { value: 'full-auto', label: 'Full auto', hint: 'Run everything without asking. Highest risk.' }
+]
 
 interface Props {
   onClose: () => void
@@ -22,6 +28,8 @@ export default function SettingsModal({ onClose, appVersion, updateStatus, onChe
   const [busy, setBusy] = useState(false)
   // AI Improvement (local self-improvement loop). Default ON: absent setting → on.
   const [aiImprovement, setAiImprovement] = useState(true)
+  // Automation autonomy. Default matches the main-process default (approve-plan).
+  const [autonomy, setAutonomy] = useState<AutonomyLevel>('approve-plan')
 
   useEffect(() => {
     let cancelled = false
@@ -39,6 +47,15 @@ export default function SettingsModal({ onClose, appVersion, updateStatus, onChe
       })
       .catch(() => {})
 
+    window.openui
+      .getSetting('autonomy_level')
+      .then((value) => {
+        if (!cancelled && (value === 'ask-each' || value === 'approve-plan' || value === 'full-auto')) {
+          setAutonomy(value)
+        }
+      })
+      .catch(() => {})
+
     const off = window.openui.onConsentUpdated((status: ConsentStatus) => {
       setEnabled(status === 'granted')
     })
@@ -47,6 +64,12 @@ export default function SettingsModal({ onClose, appVersion, updateStatus, onChe
       off()
     }
   }, [])
+
+  const chooseAutonomy = (value: AutonomyLevel): void => {
+    const prev = autonomy
+    setAutonomy(value) // optimistic; reverted on failure
+    void window.openui.setSetting('autonomy_level', value).catch(() => setAutonomy(prev))
+  }
 
   const toggleAiImprovement = (): void => {
     const next = !aiImprovement
@@ -171,6 +194,48 @@ export default function SettingsModal({ onClose, appVersion, updateStatus, onChe
             label="AI Improvement"
             onClick={toggleAiImprovement}
           />
+        </div>
+
+        {/* Automation: how autonomous the agent is when carrying out tasks */}
+        <div
+          style={{
+            borderTop: '1px solid rgba(0,0,0,0.06)',
+            paddingTop: 14,
+            marginTop: 14
+          }}
+        >
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: '#1c1c1e' }}>Automation</div>
+          <div style={{ fontSize: 12, color: '#8e8e93', lineHeight: 1.5, marginTop: 3, marginBottom: 10 }}>
+            How much OpenUI does on its own when running a multi-step task.
+          </div>
+          <div style={{ display: 'flex', gap: 6, background: '#f2f2f7', borderRadius: 9, padding: 3 }}>
+            {AUTONOMY_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => chooseAutonomy(opt.value)}
+                style={{
+                  flex: 1,
+                  border: 'none',
+                  borderRadius: 7,
+                  padding: '7px 4px',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  fontFamily: 'inherit',
+                  cursor: 'pointer',
+                  background: autonomy === opt.value ? '#ffffff' : 'transparent',
+                  color: autonomy === opt.value ? '#0a84ff' : '#636366',
+                  boxShadow: autonomy === opt.value ? '0 1px 3px rgba(0,0,0,0.12)' : 'none',
+                  transition: 'background 0.15s ease, color 0.15s ease'
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: '#8e8e93', lineHeight: 1.45, marginTop: 8 }}>
+            {AUTONOMY_OPTIONS.find((o) => o.value === autonomy)?.hint}
+          </div>
         </div>
 
         {/* App version & update check */}

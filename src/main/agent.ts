@@ -1,7 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { BrowserWindow, ipcMain } from 'electron'
-import { toolSchemas, executeTool, describeToolCall, type ToolSchema, type ToolResult, type PendingApprovalResult, type Tier } from './tools'
+import { toolSchemas, executeTool, describeToolCall, DESTRUCTIVE_TOOLS, type ToolSchema, type ToolResult, type PendingApprovalResult, type Tier } from './tools'
+import { generatePlan, looksLikeTask, type Plan } from './planner'
 import { getMcpToolSchemas, callMcpTool } from './mcp-client'
 import { database } from './database'
 import { clampTierToEntitlement } from './stripe/pricing'
@@ -58,6 +59,56 @@ function waitForHitlApproval(
   return new Promise<boolean>((resolve) => {
     pendingHitlRequests.set(id, resolve)
     emit(win, 'openui:hitl:request', { id, tool, args, label: describeToolCall(tool, args) })
+  })
+}
+
+// ── Autonomy level ────────────────────────────────────────────────────────────
+
+/**
+ * How much the agent is allowed to do without stopping to ask:
+ *   • ask-each     — confirm every state-changing tool (the original behaviour).
+ *   • approve-plan — show the whole plan, get ONE approval, then run to
+ *                    completion; only DESTRUCTIVE_TOOLS still confirm per action.
+ *   • full-auto    — run everything without prompting (destructive tools included).
+ * Persisted under the "autonomy_level" setting; defaults to approve-plan.
+ */
+export type AutonomyLevel = 'ask-each' | 'approve-plan' | 'full-auto'
+
+function getAutonomyLevel(): AutonomyLevel {
+  try {
+    const v = database.settings.getSetting('autonomy_level')
+    if (v === 'ask-each' || v === 'full-auto') return v
+  } catch {
+    /* settings unavailable — fall through to the safe default */
+  }
+  return 'approve-plan'
+}
+
+// ── Plan approval (one gate for a whole plan, vs. HITL's per-tool gate) ────────
+
+/** Resolvers keyed by plan-request id, awaited while the renderer shows PlanApprovalModal. */
+const pendingPlanRequests = new Map<string, (approved: boolean) => void>()
+let planSeq = 0
+
+/** A plan step as sent to / tracked in the renderer's task list. */
+interface PlanStepRow {
+  id: string
+  title: string
+}
+
+function planStepRows(plan: Plan): PlanStepRow[] {
+  return plan.steps.map((title, i) => ({ id: `s${i + 1}`, title }))
+}
+
+/**
+ * Emit a plan-approval request and resolve once the user approves (true) or
+ * cancels (false) the whole plan in PlanApprovalModal.
+ */
+function waitForPlanApproval(win: BrowserWindow, plan: Plan, steps: PlanStepRow[]): Promise<boolean> {
+  const id = `plan${++planSeq}`
+  return new Promise<boolean>((resolve) => {
+    pendingPlanRequests.set(id, resolve)
+    emit(win, 'openui:plan:request', { id, summary: plan.summary, steps })
   })
 }
 
@@ -258,7 +309,7 @@ export function emit(win: BrowserWindow, channel: string, ...args: unknown[]): v
  * and tolerant of trailing prose/newlines after the closing `}` (models often
  * append an explanation). Returns the object's source text, or null.
  */
-function extractFirstJsonObject(text: string): string | null {
+export function extractFirstJsonObject(text: string): string | null {
   const start = text.indexOf('{')
   if (start === -1) return null
   let depth = 0
@@ -449,6 +500,62 @@ export class StreamGate {
       this.forward(this.buffer.slice(this.forwardedLen))
       this.forwardedLen = this.buffer.length
     }
+  }
+}
+
+/**
+ * A UI-only checkpoint the executor calls after finishing each planned step, so
+ * the checklist ticks off in lockstep with real progress. It is intercepted in
+ * the agent loop (never routed through executeTool), so it isn't a real OS tool.
+ */
+const COMPLETE_STEP_TOOL = 'complete_step'
+
+/**
+ * The guidance appended to the conversation once a plan is approved. It tells the
+ * executor to run the (already-approved) steps with tool calls and to check each
+ * one off via complete_step — the mechanism that drives the live checklist.
+ */
+function buildPlanContext(plan: Plan, steps: PlanStepRow[]): string {
+  const list = steps.map((s) => `${s.id}: ${s.title}`).join('\n')
+  return [
+    `APPROVED PLAN — "${plan.summary}". The user has ALREADY approved this plan, so do not ask for confirmation; carry it out now.`,
+    '',
+    'Steps:',
+    list,
+    '',
+    `Work through the steps in order using tool calls (one tool per message, as usual). The moment you finish a step, emit ONLY this JSON to tick it off before moving on:`,
+    `{"tool": "${COMPLETE_STEP_TOOL}", "args": {"step_id": "s1"}}`,
+    '',
+    'If a step turns out to be unnecessary, still call complete_step for it with a brief note. When every step is done, reply in plain language summarising what you accomplished (never wrap the final summary in JSON).'
+  ].join('\n')
+}
+
+/**
+ * Advance the checklist when the executor checks a step off. Marks `stepId` done
+ * and the next still-pending step working, so exactly one row spins at a time.
+ */
+function advancePlan(win: BrowserWindow, steps: PlanStepRow[], stepId: string): void {
+  const idx = steps.findIndex((s) => s.id === stepId)
+  if (idx === -1) return
+  emit(win, 'openui:task:update', {
+    id: steps[idx].id,
+    label: steps[idx].title,
+    status: 'done'
+  } satisfies TaskUpdate)
+  const next = steps[idx + 1]
+  if (next) {
+    emit(win, 'openui:task:update', {
+      id: next.id,
+      label: next.title,
+      status: 'working'
+    } satisfies TaskUpdate)
+  }
+}
+
+/** Mark every not-yet-finished plan row as done (called when the agent wraps up). */
+function settlePlan(win: BrowserWindow, steps: PlanStepRow[]): void {
+  for (const s of steps) {
+    emit(win, 'openui:task:update', { id: s.id, label: s.title, status: 'done' } satisfies TaskUpdate)
   }
 }
 
@@ -683,7 +790,10 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
 
   // PR review needs more turns: list + diff×N + comment×N.
   // Designer needs more turns: get_file + export×N (with Vision calls) + comment×N.
-  const maxTurns = isPrReview ? 32 : isDesigner ? 16 : MAX_TOOL_TURNS
+  // A planned run gets a larger budget below (each step may take several tools).
+  let maxTurns = isPrReview ? 32 : isDesigner ? 16 : MAX_TOOL_TURNS
+
+  const autonomy = getAutonomyLevel()
 
   const model = modelForTier(effectiveTier)
   if (requestedTier !== effectiveTier) {
@@ -702,6 +812,67 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
 
   try {
     let finalText = ''
+
+    // ── Planning stage ────────────────────────────────────────────────────────
+    // For task-shaped requests, decompose into a checklist FIRST, show every
+    // step up front, and (under approve-plan) get a single approval before
+    // running anything. PR-review / designer flows keep their own scripted
+    // multi-step prompts and are never re-planned here.
+    let planSteps: PlanStepRow[] | null = null
+    if (!isPrReview && !isDesigner && looksLikeTask(userMessage)) {
+      let plan: Plan | null = null
+      try {
+        plan = await generatePlan(win, effectiveTier, userMessage)
+      } catch (err) {
+        console.error('[planner] failed to build a plan:', err)
+        plan = null // fall back to the reactive single-loop path
+      }
+
+      if (plan) {
+        const steps = planStepRows(plan)
+        // Show the WHOLE checklist immediately (all pending).
+        emit(win, 'openui:task:reset')
+        for (const s of steps) {
+          emit(win, 'openui:task:update', { id: s.id, label: s.title, status: 'pending' } satisfies TaskUpdate)
+        }
+
+        // approve-plan: one approval for the whole plan. full-auto skips it;
+        // ask-each shows the plan but still confirms each tool in the loop.
+        if (autonomy === 'approve-plan') {
+          const approved = await waitForPlanApproval(win, plan, steps)
+          if (!approved) {
+            const msg = "Okay — I've cancelled that plan. Tell me what you'd like to change."
+            emit(win, 'openui:chat:chunk', msg)
+            history.push({ role: 'assistant', content: msg })
+            database.messages.addMessage(convId, 'assistant', msg)
+            for (const s of steps) {
+              emit(win, 'openui:task:update', { id: s.id, label: s.title, status: 'error', detail: 'Cancelled' } satisfies TaskUpdate)
+            }
+            try {
+              database.feedback.recordTurn(convId, userMessage, msg)
+            } catch {
+              /* best-effort */
+            }
+            emit(win, 'openui:chat:done', { text: msg, toolCall: null })
+            return
+          }
+        }
+
+        planSteps = steps
+        // Give a planned run enough turns to finish (a few tools per step).
+        maxTurns = Math.min(48, 6 + plan.steps.length * 5)
+        // Mark the first step in-progress and hand the plan to the executor.
+        emit(win, 'openui:task:update', { id: steps[0].id, label: steps[0].title, status: 'working' } satisfies TaskUpdate)
+        // Append the approved plan to the user's turn rather than pushing a second
+        // consecutive user message — Anthropic requires strictly alternating roles.
+        const last = history[history.length - 1]
+        if (last && last.role === 'user') {
+          last.content = `${last.content}\n\n${buildPlanContext(plan, steps)}`
+        } else {
+          history.push({ role: 'user', content: buildPlanContext(plan, steps) })
+        }
+      }
+    }
 
     for (let turn = 0; turn < maxTurns; turn++) {
       trackEvent(Events.MODEL_ROUTE_SELECTED, {
@@ -733,26 +904,55 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
       if (!toolCall) {
         finalText = responseText // natural-language answer ⇒ turn complete
         database.messages.addMessage(convId, 'assistant', finalText)
+        // The agent considers the task done: tick off any steps it didn't
+        // explicitly check so the checklist reads complete.
+        if (planSteps) settlePlan(win, planSteps)
         break
       }
 
-      // Surface the call to the renderer and open a task-list row.
+      // complete_step is a UI-only checklist checkpoint, not an OS tool: tick
+      // the step off, feed a synthetic result back, and continue — never touch
+      // executeTool. Only meaningful during a planned run.
+      if (toolCall.tool === COMPLETE_STEP_TOOL) {
+        const stepId = String(
+          (toolCall.args.step_id ?? toolCall.args.id ?? toolCall.args.stepId) || ''
+        )
+        if (planSteps) advancePlan(win, planSteps, stepId)
+        history.push({
+          role: 'user',
+          content: `TOOL RESULT [${COMPLETE_STEP_TOOL}] success: step ${stepId || '(unknown)'} checked off. Continue with the next step.`
+        })
+        continue
+      }
+
+      // Surface the call to the renderer. During a planned run the task list is
+      // the plan checklist (advanced by complete_step), so we do NOT add a
+      // per-tool row on top of it — that would double-list the work.
       emit(win, 'openui:chat:tool', toolCall)
       const taskId = `t${++taskSeq}`
       const label = describeToolCall(toolCall.tool, toolCall.args)
-      emit(win, 'openui:task:update', {
-        id: taskId,
-        label,
-        status: 'working',
-        detail: 'OpenUI is working…'
-      } satisfies TaskUpdate)
+      if (!planSteps) {
+        emit(win, 'openui:task:update', {
+          id: taskId,
+          label,
+          status: 'working',
+          detail: 'OpenUI is working…'
+        } satisfies TaskUpdate)
+      }
+
+      // Autonomy: under approve-plan (inside an approved plan) or full-auto, run
+      // the tool without a per-action prompt — EXCEPT genuinely destructive
+      // tools, which always confirm. ask-each keeps the original per-tool gate.
+      const autopilot =
+        autonomy === 'full-auto' || (autonomy === 'approve-plan' && planSteps !== null)
+      const bypassHitl = autopilot && !DESTRUCTIVE_TOOLS.has(toolCall.tool)
 
       // State-changing tools first return PendingApprovalResult — pause and
       // ask the user via HitlModal before actually running the tool.
       const rawResult: ToolResult | PendingApprovalResult = await executeTool(
         toolCall.tool,
         toolCall.args,
-        { tier: effectiveTier }
+        { tier: effectiveTier, bypassHitl }
       )
 
       let result: ToolResult
@@ -794,12 +994,17 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
         })
       }
 
-      emit(win, 'openui:task:update', {
-        id: taskId,
-        label,
-        status: result.ok ? 'done' : 'error',
-        detail: result.ok ? result.output : result.error
-      } satisfies TaskUpdate)
+      // Per-tool rows only outside a plan; inside a plan the checklist (advanced
+      // by complete_step) is the source of truth. A failed tool still reaches the
+      // model via the TOOL RESULT below, so it can recover or explain.
+      if (!planSteps) {
+        emit(win, 'openui:task:update', {
+          id: taskId,
+          label,
+          status: result.ok ? 'done' : 'error',
+          detail: result.ok ? result.output : result.error
+        } satisfies TaskUpdate)
+      }
 
       // Feed the result back so the model can take the next step.
       history.push({ role: 'user', content: formatToolResult(toolCall, result) })
@@ -849,6 +1054,18 @@ export function registerAgentIPC(win: BrowserWindow): void {
     const resolve = pendingHitlRequests.get(id)
     if (resolve) {
       pendingHitlRequests.delete(id)
+      resolve(approved === true)
+    }
+  })
+
+  // Resolve the waiting planning stage when the user approves/cancels a plan.
+  ipcMain.on('openui:plan:response', (_event, payload: unknown) => {
+    if (typeof payload !== 'object' || payload === null) return
+    const { id, approved } = payload as Record<string, unknown>
+    if (typeof id !== 'string') return
+    const resolve = pendingPlanRequests.get(id)
+    if (resolve) {
+      pendingPlanRequests.delete(id)
       resolve(approved === true)
     }
   })
