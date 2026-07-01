@@ -21,14 +21,6 @@ import { Events } from './telemetry/events'
 import { exportWorkflow, importWorkflow, getWorkflows, deleteWorkflow, type Workflow } from './workflows'
 import { indexDirectory } from './rag'
 import {
-  isOllamaInstalled,
-  isOllamaRunning,
-  startOllama,
-  pullModel,
-  getOllamaInstallUrl,
-  dismissOllamaPrompt
-} from './local/ollamaManager'
-import {
   startRecording,
   stopRecording,
   playRecording,
@@ -463,40 +455,6 @@ app.whenReady().then(async () => {
       return { indexed: 0, chunks: 0, error: 'openui:rag:index requires a "dirPath" string.' }
     }
     return indexDirectory(dirPath.trim())
-  })
-
-  // ── Local AI / Ollama IPC ───────────────────────────────────────────────────
-  // Returns current Ollama installation and running state.
-  ipcMain.handle('openui:check-ollama', async () => {
-    const [installed, running] = await Promise.all([isOllamaInstalled(), isOllamaRunning()])
-    return { installed, running }
-  })
-
-  // Opens the official Ollama download page in the OS default browser.
-  // We deliberately never auto-install — the user must opt in.
-  ipcMain.handle('openui:install-ollama', () => {
-    void shell.openExternal(getOllamaInstallUrl())
-  })
-
-  // Attempts to start a locally-installed Ollama daemon (ollama serve).
-  ipcMain.handle('openui:start-ollama', () => startOllama())
-
-  // Records a dismiss action in settings; permanently=true suppresses future prompts.
-  ipcMain.handle('openui:dismiss-ollama-prompt', (_event, payload: unknown) => {
-    const permanent =
-      typeof payload === 'object' && payload !== null && 'permanent' in payload
-        ? Boolean((payload as Record<string, unknown>).permanent)
-        : false
-    return dismissOllamaPrompt(permanent)
-  })
-
-  // Pulls a named model via `ollama pull <modelName>`.
-  ipcMain.handle('openui:pull-model', (_event, payload: unknown) => {
-    const modelName =
-      typeof payload === 'object' && payload !== null && 'modelName' in payload
-        ? String((payload as Record<string, unknown>).modelName)
-        : 'llama3:8b'
-    return pullModel(modelName)
   })
 
   // ── Action Recorder / Macros IPC ───────────────────────────────────────────
