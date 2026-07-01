@@ -82,6 +82,22 @@ export interface HitlRequestPayload {
   label: string
 }
 
+/** One step of an approved plan, tracked as a checklist row. */
+export interface PlanStep {
+  id: string
+  title: string
+}
+
+/** Payload emitted when the planning stage needs the user to approve a plan. */
+export interface PlanRequestPayload {
+  id: string
+  summary: string
+  steps: PlanStep[]
+}
+
+/** How autonomous the agent is when executing (persisted under "autonomy_level"). */
+export type AutonomyLevel = 'ask-each' | 'approve-plan' | 'full-auto'
+
 /** Where the autonomous agent pulls its tasks from. */
 export type TaskSource = 'todo' | 'github'
 
@@ -243,6 +259,9 @@ export interface OpenUIApi {
   // HITL (Human-in-the-Loop) confirmation.
   onHitlRequest: (cb: (payload: HitlRequestPayload) => void) => () => void
   respondHitl: (id: string, approved: boolean) => void
+  // Plan approval (approve the whole plan once).
+  onPlanRequest: (cb: (payload: PlanRequestPayload) => void) => () => void
+  respondPlan: (id: string, approved: boolean) => void
   // Local AI / Ollama.
   checkOllama: () => Promise<{ installed: boolean; running: boolean }>
   installOllama: () => Promise<void>

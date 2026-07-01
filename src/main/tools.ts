@@ -99,6 +99,16 @@ export const STATE_CHANGING_TOOLS = new Set<string>([
 ])
 
 /**
+ * Tools whose effects are irreversible or reach outside the machine (deleting
+ * files, emptying the Recycle Bin, sending a message to another person, spending
+ * money). These ALWAYS require a per-action confirmation, even under the
+ * "approve the plan once" autonomy mode — approving a plan authorises the
+ * routine steps, never a hallucinated destructive one. Populated as those tools
+ * land in later milestones (WhatsApp send, file delete, recycle-bin, payments).
+ */
+export const DESTRUCTIVE_TOOLS = new Set<string>([])
+
+/**
  * Returned by executeTool when a state-changing tool needs user approval.
  * The agent loop pauses and emits openui:hitl:request to the renderer.
  */
