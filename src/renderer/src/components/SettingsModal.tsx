@@ -30,6 +30,10 @@ export default function SettingsModal({ onClose, appVersion, updateStatus, onChe
   const [aiImprovement, setAiImprovement] = useState(true)
   // Automation autonomy. Default matches the main-process default (approve-plan).
   const [autonomy, setAutonomy] = useState<AutonomyLevel>('approve-plan')
+  // Figma personal access token — a per-user credential the user supplies here
+  // (persisted to the local settings store, read by the main-process Figma tool).
+  const [figmaToken, setFigmaToken] = useState('')
+  const [figmaSaved, setFigmaSaved] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -56,6 +60,13 @@ export default function SettingsModal({ onClose, appVersion, updateStatus, onChe
       })
       .catch(() => {})
 
+    window.openui
+      .getSetting('figma_token')
+      .then((value) => {
+        if (!cancelled && typeof value === 'string') setFigmaToken(value)
+      })
+      .catch(() => {})
+
     const off = window.openui.onConsentUpdated((status: ConsentStatus) => {
       setEnabled(status === 'granted')
     })
@@ -77,6 +88,17 @@ export default function SettingsModal({ onClose, appVersion, updateStatus, onChe
     void window.openui.setSetting('ai_improvement_enabled', next).catch(() => {
       setAiImprovement(!next)
     })
+  }
+
+  // Persist the Figma token (trimmed) on blur, with a brief "Saved" confirmation.
+  const saveFigmaToken = (): void => {
+    void window.openui
+      .setSetting('figma_token', figmaToken.trim())
+      .then(() => {
+        setFigmaSaved(true)
+        window.setTimeout(() => setFigmaSaved(false), 1500)
+      })
+      .catch(() => {})
   }
 
   const toggle = async (): Promise<void> => {
@@ -236,6 +258,48 @@ export default function SettingsModal({ onClose, appVersion, updateStatus, onChe
           <div style={{ fontSize: 11.5, color: '#8e8e93', lineHeight: 1.45, marginTop: 8 }}>
             {AUTONOMY_OPTIONS.find((o) => o.value === autonomy)?.hint}
           </div>
+        </div>
+
+        {/* Integrations: Figma personal access token */}
+        <div
+          style={{
+            borderTop: '1px solid rgba(0,0,0,0.06)',
+            paddingTop: 14,
+            marginTop: 14
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#1c1c1e' }}>Figma</div>
+            {figmaSaved && (
+              <span style={{ fontSize: 11, color: '#34c759', fontWeight: 500 }}>Saved</span>
+            )}
+          </div>
+          <div style={{ fontSize: 12, color: '#8e8e93', lineHeight: 1.5, marginTop: 3, marginBottom: 8 }}>
+            Paste a personal access token to let OpenUI review your Figma designs. Create one at
+            figma.com → Settings → Security → Personal access tokens. Stored locally on this device.
+          </div>
+          <input
+            type="password"
+            value={figmaToken}
+            onChange={(e) => setFigmaToken(e.target.value)}
+            onBlur={saveFigmaToken}
+            placeholder="figd_…"
+            aria-label="Figma personal access token"
+            autoComplete="off"
+            spellCheck={false}
+            style={{
+              width: '100%',
+              boxSizing: 'border-box',
+              border: '1px solid rgba(0,0,0,0.12)',
+              borderRadius: 8,
+              padding: '8px 10px',
+              fontSize: 12.5,
+              fontFamily: 'inherit',
+              color: '#1c1c1e',
+              background: '#fff',
+              outline: 'none'
+            }}
+          />
         </div>
 
         {/* App version & update check */}

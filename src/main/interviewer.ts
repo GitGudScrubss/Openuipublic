@@ -1,7 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
 import { BrowserWindow, ipcMain } from 'electron'
 import { transcribeWithWhisper, synthesizeSpeech } from './voice'
 import { coerceTier } from './agent'
+import { callChatProxyText } from './edgeFunctions'
 import type { Tier } from './tools'
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -122,28 +122,38 @@ function buildMessages(
   return msgs
 }
 
-/** Call Claude to produce the interviewer's next question / closing remark. */
-async function generateQuestion(session: InterviewSession, isClosing = false): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is required for the AI interviewer.')
+/**
+ * Tier-scoped chat-proxy model key for this session. chat-proxy clamps it to the
+ * user's verified entitlement, so this is only a hint.
+ */
+function modelKeyForTier(tier: Tier): string {
+  return tier === 'enterprise'
+    ? 'enterprise-default'
+    : tier === 'pro'
+      ? 'pro-default'
+      : 'free-default'
+}
 
+/**
+ * Produce the interviewer's next question / closing remark.
+ *
+ * Routed through the `chat-proxy` Edge Function so OUR Anthropic key stays
+ * server-side — the same server-side-key pattern the main chat path uses. No
+ * LLM key is ever read from `process.env` in the shipped client.
+ */
+async function generateQuestion(session: InterviewSession, isClosing = false): Promise<string> {
   const closingHint = isClosing
     ? '[SYSTEM: This is the final turn. Please close the interview warmly, thank the candidate for their time, and invite them to ask any questions they may have for you.]'
     : undefined
 
-  const messages = buildMessages(session, closingHint)
-  const client = new Anthropic({ apiKey })
-
-  const response = await client.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 300,
+  const text = await callChatProxyText({
     system: INTERVIEWER_SYSTEM_PROMPT,
-    messages
+    modelKey: modelKeyForTier(session.tier),
+    messages: buildMessages(session, closingHint)
   })
 
-  const block = response.content[0]
-  if (block.type !== 'text') throw new Error('Unexpected response type from interviewer model.')
-  return block.text.trim()
+  if (!text) throw new Error('The interviewer model returned an empty response.')
+  return text
 }
 
 // ── Core flow ────────────────────────────────────────────────────────────────

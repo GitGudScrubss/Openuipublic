@@ -12,7 +12,8 @@ are intentionally **excluded** from the Electron TypeScript build
 
 | Function             | Called by            | Purpose                                                            |
 | -------------------- | -------------------- | ------------------------------------------------------------------ |
-| `chat-proxy`         | App (cloudFreeTier.ts) | Proxy chat to Anthropic/OpenAI on OUR keys; enforce the per-tier daily message limit (Free = 20/day). The cloud-first path that makes the app work with no local setup. |
+| `chat-proxy`         | App (cloudFreeTier.ts) | Proxy chat to Anthropic/OpenAI on OUR keys; enforce the per-tier daily message limit (Free = 20/day). The cloud-first path that makes the app work with no local setup. Also serves cloud vision (`read_screen`), Figma design review, and the AI interviewer's Claude calls (non-streaming, via `edgeFunctions.ts`). |
+| `voice-proxy`        | App (voice.ts)       | Transcribe audio (OpenAI Whisper) and synthesize speech (ElevenLabs → OpenAI TTS) on OUR keys, so the voice keys never ship in the client. Verifies the caller's Supabase token; `{ action: 'transcribe' | 'synthesize' }`. |
 | `create-checkout`    | App (checkout.ts)    | Create a Stripe Checkout Session, return its hosted URL.            |
 | `customer-portal`    | App (checkout.ts)    | Return a Stripe Billing Portal URL (manage/cancel/invoices).       |
 | `check-subscription` | App (subscriptionSync) | Return live `{ tier, status, currentPeriodEnd, customerId }`.    |
@@ -38,6 +39,19 @@ access token in the `Authorization: Bearer …` header. The function:
 The `usage_tracking` table is created by
 `supabase/migrations/001_create_usage_tracking.sql`.
 
+### `voice-proxy` request contract
+
+The app POSTs one of two actions with the user's Supabase access token in the
+`Authorization: Bearer …` header:
+
+- `{ action: 'transcribe', audioBase64, mimeType }` → `{ text }` (OpenAI Whisper)
+- `{ action: 'synthesize', text }` → `{ audioBase64, mimeType }` (ElevenLabs when
+  `ELEVENLABS_API_KEY` is set, otherwise OpenAI TTS)
+
+It verifies the token before touching any key, keeping OUR Whisper/TTS keys off
+the client. Per-tier voice-minute limits stay enforced client-side in `voice.ts`
+against the local `voice_usage` table (unchanged).
+
 ## Secrets
 
 Set these on the Supabase project (never in the app's `.env`):
@@ -54,8 +68,11 @@ supabase secrets set \
 # held only here and never shipped in the app.
 # SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided to functions automatically.
 
-# Optional — ops alerting for chat-proxy (see "Alerting" below):
-supabase secrets set ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
+# voice-proxy uses OPENAI_API_KEY (above) for Whisper + fallback TTS. Optionally
+# add ElevenLabs for richer voices (falls back to OpenAI TTS when unset):
+supabase secrets set \
+  ELEVENLABS_API_KEY=... \
+  ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM   # optional; overrides the default voice
 
 # Waitlist (Mailchimp) — required by the `waitlist` function:
 supabase secrets set \
@@ -71,6 +88,8 @@ supabase secrets set \
 # (the platform validates the access token; the function then re-derives the user
 # and their tier via getUser()).
 supabase functions deploy chat-proxy
+# voice-proxy also requires a signed-in user (keep JWT verification on):
+supabase functions deploy voice-proxy
 supabase functions deploy create-checkout
 supabase functions deploy customer-portal
 supabase functions deploy check-subscription
@@ -86,18 +105,6 @@ Then register the webhook endpoint in the Stripe dashboard
 (`https://<project-ref>.functions.supabase.co/stripe-webhook`) for the events:
 `checkout.session.completed`, `customer.subscription.created`,
 `customer.subscription.updated`, `customer.subscription.deleted`.
-
-## Alerting
-
-`chat-proxy` is a single point of failure for AI chat across every user and
-every tier — a bad/expired/out-of-credit `ANTHROPIC_API_KEY` or
-`OPENAI_API_KEY` breaks the product for 100% of signed-in users at once, and
-without alerting the first sign is a support ticket or a churned user. Set
-`ALERT_WEBHOOK_URL` (any incoming webhook that accepts `{"text": "..."}`  —
-Slack, Discord, or a PagerDuty Events API adapter) and the function POSTs
-there on a `502 llm_error` (provider rejected the request — check the key) or
-`500 internal_error` (function crashed), with a 5-minute cooldown per error
-kind so an outage doesn't spam the channel. Leave unset to no-op.
 
 ## Security notes
 

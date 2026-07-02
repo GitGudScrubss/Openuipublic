@@ -1,5 +1,3 @@
-import OpenAI, { toFile } from 'openai'
-import * as https from 'node:https'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { BrowserWindow, ipcMain } from 'electron'
@@ -7,6 +5,7 @@ import { coerceTier, handleChat } from './agent'
 import { getUserTier, getCurrentUser } from './auth/sessionManager'
 import { getDb } from './database/init'
 import { monthlyVoiceMinuteLimit } from './stripe/pricing'
+import { callEdgeFunction } from './edgeFunctions'
 import { trackEvent } from './telemetry/posthog'
 import { Events } from './telemetry/events'
 
@@ -44,99 +43,60 @@ async function transcribeWithLocalWhisper(audioBuffer: Buffer): Promise<string> 
   }
 }
 
-export async function transcribeWithWhisper(audioBuffer: Buffer, mimeType: string): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) {
-    throw new Error(
-      'OPENAI_API_KEY is not set — Whisper transcription requires an OpenAI API key.'
-    )
+/** Turn a non-OK voice-proxy response into a user-facing message. */
+async function proxyErrorMessage(response: Response, label: string): Promise<string> {
+  let code = ''
+  try {
+    const body = (await response.json()) as { error?: unknown }
+    if (typeof body.error === 'string') code = body.error
+  } catch {
+    /* non-JSON body — fall through to the generic message */
   }
+  if (code === 'transcription_unavailable' || code === 'synthesis_unavailable') {
+    return `${label} is temporarily unavailable — the voice service is not configured on the server.`
+  }
+  if (response.status === 429) {
+    return "You've reached your voice usage limit. Please try again later."
+  }
+  return `${label} failed. Please try again in a moment.`
+}
 
-  const client = new OpenAI({ apiKey })
-  const ext = mimeType.includes('ogg') ? 'ogg' : mimeType.includes('mp4') ? 'mp4' : 'webm'
-
-  const result = await client.audio.transcriptions.create({
-    file: await toFile(audioBuffer, `recording.${ext}`, { type: mimeType }),
-    model: 'whisper-1'
+/**
+ * Transcribe audio to text via the `voice-proxy` Edge Function.
+ *
+ * OUR OpenAI Whisper key lives ONLY in the Edge Function (never baked into the
+ * shipped app), so the client sends the audio with the signed-in user's Supabase
+ * token and receives the transcript back — the same server-side-key pattern chat
+ * already uses. `callEdgeFunction` throws a friendly error when the user isn't
+ * signed in or the session can't be refreshed.
+ */
+export async function transcribeWithWhisper(audioBuffer: Buffer, mimeType: string): Promise<string> {
+  const response = await callEdgeFunction('voice-proxy', {
+    action: 'transcribe',
+    audioBase64: audioBuffer.toString('base64'),
+    mimeType
   })
-
-  return result.text.trim()
+  if (!response.ok) throw new Error(await proxyErrorMessage(response, 'Voice transcription'))
+  const data = (await response.json().catch(() => ({}))) as { text?: unknown }
+  return typeof data.text === 'string' ? data.text.trim() : ''
 }
 
 // ── Text-to-Speech ──────────────────────────────────────────────────────────
 
-function httpsPost(url: string, body: string, headers: Record<string, string>): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url)
-    const bodyBytes = Buffer.from(body, 'utf8')
-    const req = https.request(
-      {
-        method: 'POST',
-        hostname: parsed.hostname,
-        path: parsed.pathname + parsed.search,
-        headers: { ...headers, 'Content-Length': bodyBytes.byteLength }
-      },
-      (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', (c: Buffer) => chunks.push(c))
-        res.on('end', () => {
-          const buf = Buffer.concat(chunks)
-          if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`HTTP ${res.statusCode}: ${buf.toString('utf8').slice(0, 200)}`))
-          } else {
-            resolve(buf)
-          }
-        })
-      }
-    )
-    req.on('error', reject)
-    req.write(bodyBytes)
-    req.end()
-  })
-}
-
-// ElevenLabs voice ID — overridable via ELEVENLABS_VOICE_ID env var.
-// Default: "Rachel" (21m00Tcm4TlvDq8ikWAM) — neutral, professional female voice.
-const DEFAULT_ELEVENLABS_VOICE = '21m00Tcm4TlvDq8ikWAM'
-
-async function synthesizeWithElevenLabs(text: string, apiKey: string): Promise<Buffer> {
-  const voiceId = process.env.ELEVENLABS_VOICE_ID ?? DEFAULT_ELEVENLABS_VOICE
-  return httpsPost(
-    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`,
-    JSON.stringify({
-      text,
-      model_id: 'eleven_monolingual_v1',
-      voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-    }),
-    {
-      'xi-api-key': apiKey,
-      'Content-Type': 'application/json',
-      Accept: 'audio/mpeg'
-    }
-  )
-}
-
 /**
- * Synthesize speech from text. Uses ElevenLabs when ELEVENLABS_API_KEY is set
- * (richer voices); falls back to OpenAI TTS (tts-1 / nova).
+ * Synthesize speech from text via the `voice-proxy` Edge Function. The function
+ * prefers ElevenLabs (richer voices) when its key is configured server-side and
+ * otherwise falls back to OpenAI TTS — either way the key stays on the server.
  * Returns a Buffer containing MP3 audio.
  */
 export async function synthesizeSpeech(text: string): Promise<Buffer> {
-  const elevenLabsKey = process.env.ELEVENLABS_API_KEY
-  if (elevenLabsKey) return synthesizeWithElevenLabs(text, elevenLabsKey)
-
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY or ELEVENLABS_API_KEY is required for text-to-speech.')
+  const response = await callEdgeFunction('voice-proxy', { action: 'synthesize', text })
+  if (!response.ok) throw new Error(await proxyErrorMessage(response, 'Text-to-speech'))
+  const data = (await response.json().catch(() => ({}))) as { audioBase64?: unknown }
+  if (typeof data.audioBase64 !== 'string' || !data.audioBase64) {
+    throw new Error('Text-to-speech returned no audio. Please try again.')
   }
-  const client = new OpenAI({ apiKey })
-  const response = await client.audio.speech.create({
-    model: 'tts-1',
-    voice: 'nova',
-    input: text,
-    response_format: 'mp3'
-  })
-  return Buffer.from(await response.arrayBuffer())
+  return Buffer.from(data.audioBase64, 'base64')
 }
 
 function getVoiceSecondsToday(userId: string): number {

@@ -27,10 +27,10 @@ import { resolve as resolvePath, join as joinPath, dirname, sep } from 'node:pat
 import { homedir } from 'node:os'
 import { SENSITIVE_PATH_RE, resolveSafePath } from './fs/pathSafety'
 import { desktopCapturer, clipboard, shell } from 'electron'
-import Anthropic from '@anthropic-ai/sdk'
 import { checkAccessibility, type PermissionTarget } from './permissions'
 import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
+import { callChatProxyText } from './edgeFunctions'
 import { trackEvent } from './telemetry/posthog'
 import { Events } from './telemetry/events'
 import { findWorkflow } from './workflows'
@@ -769,10 +769,12 @@ async function read_screen(
   // ── 2. Analyse: Vision API (pro/enterprise) or local OCR (free) ───────────
   if (tier === 'pro' || tier === 'enterprise') {
     try {
-      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY ?? '' })
-      const response = await client.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1024,
+      // Cloud vision runs through chat-proxy so OUR Anthropic key stays
+      // server-side — chat-proxy already accepts Anthropic-style image content
+      // blocks. The tier-scoped modelKey resolves to a vision-capable Claude
+      // model and the proxy clamps it to the caller's verified entitlement.
+      const description = await callChatProxyText({
+        modelKey: tier === 'enterprise' ? 'enterprise-default' : 'pro-default',
         messages: [
           {
             role: 'user',
@@ -781,18 +783,11 @@ async function read_screen(
                 type: 'image',
                 source: { type: 'base64', media_type: 'image/png', data: base64Image }
               },
-              {
-                type: 'text',
-                text: 'Describe the UI elements and their X,Y coordinates.'
-              }
+              { type: 'text', text: 'Describe the UI elements and their X,Y coordinates.' }
             ]
           }
         ]
       })
-      const description = response.content
-        .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n')
       trackEvent(Events.SCREEN_CAPTURED, { tier, method: 'cloud_vision' })
       return { ok: true, output: description }
     } catch (err) {
