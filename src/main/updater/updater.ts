@@ -15,20 +15,22 @@ import { trackEvent, EVENTS } from '../telemetry'
  *   `download-progress` → `update-downloaded` → user clicks Restart →
  *   `quitAndInstall()`.
  *
- * macOS is currently UNSIGNED. Squirrel.Mac refuses to apply an unsigned,
- * un-notarized update (Gatekeeper), so we never auto-download there: the
- * update is surfaced and the "Download" action is diverted to the GitHub
- * Releases page in the user's browser (see `downloadUpdate` / `openReleasesPage`
- * and the `canAutoUpdate: false` flag sent to the renderer). Once the macOS
- * build is signed + notarized, flip `canAutoUpdate` and the in-app flow works
- * unchanged.
+ * macOS: Squirrel.Mac refuses to apply an unsigned, un-notarized update
+ * (Gatekeeper), so on an unsigned build we never auto-download: the update is
+ * surfaced and the "Download" action is diverted to the GitHub Releases page
+ * in the user's browser (see `downloadUpdate` / `openReleasesPage` and the
+ * `canAutoUpdate` flag sent to the renderer). `OPENUI_MAC_SIGNED` is baked at
+ * build time (electron.vite.config.ts) from whether CSC_LINK + APPLE_TEAM_ID
+ * were present when the release was built (.github/workflows/release.yml) —
+ * a signed+notarized build flips this automatically, no manual toggle needed.
  */
 
 const RELEASES_LATEST_URL = 'https://github.com/Satyabrat2005/Openui/releases/latest'
 const isMac = process.platform === 'darwin'
+const isMacSigned = process.env.OPENUI_MAC_SIGNED === 'true'
 
 /** electron-updater can only silently auto-update on a signed platform. */
-const canAutoUpdate = !isMac
+const canAutoUpdate = !isMac || isMacSigned
 
 /** Don't re-hit the feed on every window focus — throttle focus-driven checks. */
 const FOCUS_CHECK_THROTTLE_MS = 60 * 60 * 1000 // 1 hour
@@ -51,9 +53,9 @@ export function initUpdater(window: BrowserWindow): void {
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
-  if (isMac) {
+  if (isMac && !isMacSigned) {
     console.warn(
-      `[Updater] macOS builds are unsigned for v${app.getVersion()}; silent auto-update is ` +
+      `[Updater] macOS build v${app.getVersion()} is unsigned; silent auto-update is ` +
         'unavailable (requires code signing + notarization). Falling back to a browser ' +
         'download of the latest GitHub release.'
     )
@@ -149,7 +151,7 @@ export async function downloadUpdate(): Promise<void> {
 
   // Unsigned macOS can't apply an in-app update; send the user to the release
   // page to grab the new .dmg manually rather than starting a doomed download.
-  if (isMac) {
+  if (isMac && !isMacSigned) {
     await openReleasesPage()
     return
   }

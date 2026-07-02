@@ -19,6 +19,7 @@
 // Deploy:  supabase functions deploy chat-proxy
 // Secrets: ANTHROPIC_API_KEY, OPENAI_API_KEY
 //          (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are injected automatically.)
+//          ALERT_WEBHOOK_URL (optional) — see alertOncePerWindow() below.
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -26,6 +27,43 @@ const supabase = createClient(
   Deno.env.get('SUPABASE_URL') ?? '',
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
 )
+
+// This function is the single point of failure for AI chat across every user
+// and every tier — a bad/expired/out-of-credit ANTHROPIC_API_KEY or OPENAI_API_KEY
+// breaks the product for 100% of signed-in users at once (this has happened
+// before: it surfaces client-side as "AI service temporarily unavailable").
+// When ALERT_WEBHOOK_URL is set (any Slack-/Discord-/PagerDuty-compatible
+// incoming-webhook URL that accepts `{"text": "..."}`), a 502 (LLM provider
+// rejected the request — almost always a bad server-side key) or 500
+// (function crashed) fires a POST there. Cooldown de-dupes noisy alerts
+// across warm-isolate reuse; unset ALERT_WEBHOOK_URL to no-op entirely.
+const ALERT_WEBHOOK_URL = Deno.env.get('ALERT_WEBHOOK_URL')
+const ALERT_COOLDOWN_MS = 5 * 60 * 1000
+const lastAlertAt = new Map<string, number>()
+
+async function alertOncePerWindow(kind: string, detail: string): Promise<void> {
+  if (!ALERT_WEBHOOK_URL) return
+  const now = Date.now()
+  const last = lastAlertAt.get(kind) ?? 0
+  if (now - last < ALERT_COOLDOWN_MS) return
+  lastAlertAt.set(kind, now)
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 3000)
+    await fetch(ALERT_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: `:rotating_light: chat-proxy ${kind}: ${detail} (next alert for this kind suppressed for ${ALERT_COOLDOWN_MS / 60000}m)`
+      }),
+      signal: controller.signal
+    })
+    clearTimeout(timeout)
+  } catch (err) {
+    // Alerting must never break the request it's alerting about.
+    console.error('alertOncePerWindow failed:', err)
+  }
+}
 
 type Tier = 'free' | 'pro' | 'enterprise'
 type Provider = 'anthropic' | 'openai'
@@ -207,6 +245,12 @@ serve(async (req) => {
     if (!response.ok || !response.body) {
       const errorData = await response.text().catch(() => '')
       console.error('LLM API error:', response.status, errorData)
+      // Fire-and-forget (not awaited) so a slow/dead webhook can't add latency
+      // to the user-facing error response; it carries its own 3s timeout.
+      void alertOncePerWindow(
+        'llm_error',
+        `${modelConfig.provider} returned HTTP ${response.status} — check ANTHROPIC_API_KEY/OPENAI_API_KEY validity and account credit. Body: ${errorData.slice(0, 300)}`
+      )
       return json({ error: 'llm_error' }, 502)
     }
 
@@ -238,6 +282,7 @@ serve(async (req) => {
     return json(data, 200, rateHeaders)
   } catch (error) {
     console.error('Chat proxy error:', error)
+    void alertOncePerWindow('internal_error', error instanceof Error ? error.message : String(error))
     return json({ error: 'internal_error' }, 500)
   }
 })

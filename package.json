@@ -78,7 +78,15 @@
                         "openui"
                     ]
                 }
-            ]
+            ],
+            "hardenedRuntime": true,
+            "gatekeeperAssess": false,
+            "entitlements": "resources/entitlements.mac.plist",
+            "entitlementsInherit": "resources/entitlements.mac.plist",
+            "extendInfo": {
+                "NSMicrophoneUsageDescription": "OpenUI uses the microphone for push-to-talk voice input, transcribed via Whisper.",
+                "NSAppleEventsUsageDescription": "OpenUI can open and control other apps (e.g. Calendar) when you ask it to."
+            }
         },
         "dmg": {
             "title": "${productName} ${version}",

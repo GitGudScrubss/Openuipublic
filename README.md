@@ -524,12 +524,21 @@ npm run build:mac    # → dist/OpenUI.dmg (universal arm64 + x64)
 | `WIN_CSC_LINK` | Windows | Base64-encoded EV/OV `.pfx` cert |
 | `WIN_CSC_KEY_PASSWORD` | Windows | Passphrase for the `.pfx` |
 
-All signing secrets are optional. If the Apple secrets are absent, the macOS
-build is **ad-hoc signed** by `scripts/notarize.js` (so it still launches on
-Apple Silicon) but not notarized — beta users clear Gatekeeper once via
-[docs/INSTALL-MACOS-BETA.md](docs/INSTALL-MACOS-BETA.md). If the Windows cert is
-absent, the installer is unsigned and SmartScreen shows a "unknown publisher"
-notice. Add the secrets above to get fully signed + notarized GA builds.
+All signing secrets are optional. The macOS build config carries
+`hardenedRuntime` + a scoped entitlements file (`resources/entitlements.mac.plist`
+— JIT + audio-input only) so a signed build is notarizable as-is. `scripts/notarize.js`
+then chooses a path automatically:
+
+- **Apple secrets present** → the Developer-ID-signed app is submitted to Apple's
+  notary service for a fully signed + notarized GA build (no Gatekeeper warning).
+- **Apple secrets absent (beta path)** → the bundle is **ad-hoc signed** so it
+  still launches on Apple Silicon; beta users clear Gatekeeper once via
+  [docs/INSTALL-MACOS-BETA.md](docs/INSTALL-MACOS-BETA.md).
+
+If the Windows cert is absent, the installer is unsigned and SmartScreen shows an
+"unknown publisher" notice. Once a build is fully signed, the packaged app
+auto-detects this (`OPENUI_MAC_SIGNED`, baked at build time) and enables silent
+in-app auto-update on macOS instead of the browser-redirect fallback.
 
 **Icon generation** runs automatically on `npm install` via `scripts/convert-icon.js` (synthesises a 1024×1024 orb PNG, emits `.ico` and `.icns` — no external tooling required).
 

@@ -24,6 +24,36 @@
 #     SUPABASE_URL
 #     SUPABASE_ANON_KEY
 #
+# CODE SIGNING / NOTARIZATION Secrets (macOS — Settings → Secrets and
+# variables → Actions). Without these the macOS build is ad-hoc-signed and
+# Gatekeeper blocks it for every user who is not a developer ("app is damaged
+# and can't be opened"). Set all five to ship a real, notarized macOS release:
+#     CSC_LINK                     — base64 or file:// path to the Developer ID
+#                                     Application .p12 certificate
+#     CSC_KEY_PASSWORD             — password for that .p12
+#     APPLE_ID                     — Apple ID email enrolled in the Developer
+#                                     Program
+#     APPLE_APP_SPECIFIC_PASSWORD  — app-specific password for that Apple ID
+#                                     (generate at appleid.apple.com, NOT the
+#                                     account password)
+#     APPLE_TEAM_ID                — 10-character Developer Team ID
+#   electron-builder reads CSC_LINK/CSC_KEY_PASSWORD directly; APPLE_ID/
+#   APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID are consumed by the afterSign
+#   hook (scripts/notarize.js), which skips notarization silently if any are
+#   unset — so the build still succeeds without them, it just won't pass
+#   Gatekeeper on a clean machine. The workflow below warns (not fails) when
+#   they're missing so it stays usable in forks / pre-signing-setup releases.
+#
+# CODE SIGNING Secrets (Windows — same Settings page). Without these the
+# Windows installer is unsigned and SmartScreen shows an "unknown publisher"
+# warning on first run:
+#     WIN_CSC_LINK          — base64 or file:// path to an EV/OV Authenticode
+#                              .pfx certificate
+#     WIN_CSC_KEY_PASSWORD  — password for that .pfx
+#   electron-builder reads these directly (falling back to CSC_LINK/
+#   CSC_KEY_PASSWORD if the WIN_-prefixed pair is unset); no notarization step
+#   applies on Windows.
+#
 # OPTIONAL GitHub Secrets (Settings → Secrets and variables → Actions):
 #   These let the packaged build ship with the Stripe price IDs inlined. They
 #   are NOT secret (public SKU-like values) but are kept in Actions secrets for
@@ -98,6 +128,30 @@ jobs:
           fi
           echo "All required build secrets are present."
 
+      # ── Warn (don't fail) if macOS signing secrets are absent — the build
+      # still succeeds unsigned, but the resulting .dmg will be Gatekeeper-
+      # blocked for real users. Surfaced loudly so an unsigned release is a
+      # deliberate choice, not a silent gap.
+      - name: Check macOS signing secrets
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=""
+          for name in CSC_LINK APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            val="${!name}"
+            [ -z "$val" ] && missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::macOS signing secrets missing:$missing — this build will be ad-hoc-signed and Gatekeeper will block it on other machines ('app is damaged'). Set them in Settings → Secrets and variables → Actions for a distributable release."
+          else
+            echo "All macOS signing/notarization secrets are present — this build will be signed and notarized."
+          fi
+
       - name: Build macOS DMG
         if: matrix.os == 'macos-latest'
         shell: bash
@@ -126,6 +180,14 @@ jobs:
           VITE_STRIPE_ENTERPRISE_PRICE_ID: ${{ secrets.VITE_STRIPE_ENTERPRISE_PRICE_ID }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+          # Code signing (electron-builder reads these directly) + notarization
+          # (consumed by scripts/notarize.js's afterSign hook). Both no-op
+          # gracefully when unset — see the header comment for what each does.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       # hnswlib-node (RAG vector index) cannot be rebuilt against Electron's ABI
       # on the Windows runner (C2666 under the runner's MSVC), and there is no
@@ -165,6 +227,10 @@ jobs:
           VITE_STRIPE_ENTERPRISE_PRICE_ID: ${{ secrets.VITE_STRIPE_ENTERPRISE_PRICE_ID }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
+          # Authenticode signing — no-ops gracefully when unset (unsigned .exe,
+          # SmartScreen "unknown publisher" warning).
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
 
       # Upload the installer, the electron-updater channel file (latest-mac.yml)
       # and the differential-update blockmaps so the publish job can attach them.

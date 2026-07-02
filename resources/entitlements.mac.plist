@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for notarized macOS builds (electron-builder
+  `mac.entitlements` / `mac.entitlementsInherit`, see package.json).
+
+  Electron itself needs the four `com.apple.security.cs.*` exceptions below —
+  without them the hardened-runtime binary crashes on launch (V8 JIT requires
+  writable+executable pages, which the runtime blocks by default). The two
+  `device.*` entitlements gate the OS permission prompts OpenUI actually uses:
+  microphone (push-to-talk voice input, Whisper) and screen recording
+  (`read_screen()` via desktopCapturer). Nothing else is requested — no camera,
+  no Apple Events/AppleScript entitlement is needed since `osascript` is
+  invoked as a subprocess, not via the Scripting Bridge.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.device.microphone</key>
+	<true/>
+</dict>
+</plist>
