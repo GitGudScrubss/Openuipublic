@@ -1,23 +1,51 @@
-// afterSign hook called by electron-builder after the app bundle is signed.
-// Submits the signed .app to Apple's notary service so Gatekeeper accepts it.
-// Skips silently when the required env vars are absent (local/unsigned builds).
+// afterSign hook — electron-builder calls this after it packages the .app.
+//
+// Two paths, chosen by whether real Apple credentials are present:
+//
+//   • Apple creds set (APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID)
+//     → submit the Developer-ID-signed app to Apple's notary service so
+//       Gatekeeper accepts it with no warning (the GA path).
+//
+//   • Apple creds absent (the current BETA path)
+//     → ad-hoc sign the bundle ourselves. Apple Silicon refuses to launch an
+//       unsigned/invalidly-signed app at all, and electron-builder invalidates
+//       Electron's shipped ad-hoc signature when it injects our app into the
+//       bundle. Re-applying an ad-hoc signature (`codesign -s -`) guarantees the
+//       .app launches after the user clears quarantine (right-click → Open, or
+//       `xattr -dr com.apple.quarantine`). See docs/INSTALL-MACOS-BETA.md.
+//       This is idempotent and safe; it does NOT make the app notarized.
 const { notarize } = require('@electron/notarize');
+const { execFileSync } = require('child_process');
 const path = require('path');
 
-exports.default = async function notarizing(context) {
+exports.default = async function afterSign(context) {
   if (context.electronPlatformName !== 'darwin') return;
-
-  const { APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID } = process.env;
-  if (!APPLE_ID || !APPLE_APP_SPECIFIC_PASSWORD || !APPLE_TEAM_ID) {
-    console.log(
-      'notarize: skipping — APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID not set'
-    );
-    return;
-  }
 
   const appName = context.packager.appInfo.productFilename;
   const appPath = path.join(context.appOutDir, `${appName}.app`);
 
+  const { APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID } = process.env;
+
+  // ── Beta path: no Apple account → ad-hoc sign so the app is runnable ────────
+  if (!APPLE_ID || !APPLE_APP_SPECIFIC_PASSWORD || !APPLE_TEAM_ID) {
+    console.log(
+      'notarize: APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID not set ' +
+        '— ad-hoc signing for beta (app will require right-click → Open on first launch).'
+    );
+    try {
+      // --force replaces the (now-invalid) signature; -s - is the ad-hoc identity.
+      execFileSync('codesign', ['--force', '--deep', '--sign', '-', appPath], {
+        stdio: 'inherit',
+      });
+      console.log(`notarize: ad-hoc signed ${appPath}`);
+    } catch (err) {
+      console.error('notarize: ad-hoc codesign failed:', err.message);
+      throw err;
+    }
+    return;
+  }
+
+  // ── GA path: real credentials → notarize with Apple ─────────────────────────
   console.log(`notarize: submitting ${appPath} to Apple notary service…`);
   await notarize({
     appBundleId: 'com.openui.app',

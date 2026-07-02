@@ -234,6 +234,10 @@ jobs:
 
       # Upload the installer, the electron-updater channel file (latest-mac.yml)
       # and the differential-update blockmaps so the publish job can attach them.
+      # NOTE: the *.zip is REQUIRED, not optional. On macOS electron-updater
+      # downloads the update from the .zip (latest-mac.yml points at it), NOT the
+      # .dmg — the .dmg is only for first-install. Omitting the zip makes every
+      # macOS auto-update 404 on the file the feed references. Upload all four.
       - name: Upload macOS artifacts
         if: matrix.os == 'macos-latest'
         uses: actions/upload-artifact@v4
@@ -241,6 +245,7 @@ jobs:
           name: macos-build
           path: |
             dist/*.dmg
+            dist/*.zip
             dist/latest*.yml
             dist/*.blockmap
           if-no-files-found: warn
@@ -288,6 +293,7 @@ jobs:
         with:
           files: |
             ./artifacts/mac/*.dmg
+            ./artifacts/mac/*.zip
             ./artifacts/mac/latest*.yml
             ./artifacts/mac/*.blockmap
             ./artifacts/win/*.exe

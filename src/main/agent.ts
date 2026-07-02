@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
+import { Ollama } from 'ollama'
 import { BrowserWindow, ipcMain } from 'electron'
 import { toolSchemas, executeTool, describeToolCall, DESTRUCTIVE_TOOLS, type ToolSchema, type ToolResult, type PendingApprovalResult, type Tier } from './tools'
 import { generatePlan, looksLikeTask, type Plan } from './planner'
@@ -18,15 +19,22 @@ import {
   buildFewShotBlock,
   exportDatasetToFile
 } from './trainingStore'
+import {
+  parseToolCall as parseToolCallCore,
+  extractFirstJsonObject,
+  StreamGate,
+  type ToolCall
+} from './toolCallParser'
+
+// Re-exported so existing importers (autonomous.ts, planner.ts) keep resolving
+// these against `./agent`; the implementations now live in the pure, unit-tested
+// `toolCallParser` module.
+export { extractFirstJsonObject, StreamGate }
+export type { ToolCall }
 
 export interface Message {
   role: 'user' | 'assistant'
   content: string
-}
-
-export interface ToolCall {
-  tool: string
-  args: Record<string, unknown>
 }
 
 type TaskStatus = 'pending' | 'working' | 'done' | 'error'
@@ -313,36 +321,6 @@ export function emit(win: BrowserWindow, channel: string, ...args: unknown[]): v
   }
 }
 
-/**
- * Extract the first *balanced* JSON object from `text`, starting at the first
- * `{`. String-aware so braces inside string values don't end the object early,
- * and tolerant of trailing prose/newlines after the closing `}` (models often
- * append an explanation). Returns the object's source text, or null.
- */
-export function extractFirstJsonObject(text: string): string | null {
-  const start = text.indexOf('{')
-  if (start === -1) return null
-  let depth = 0
-  let inString = false
-  let escaped = false
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i]
-    if (inString) {
-      if (escaped) escaped = false
-      else if (ch === '\\') escaped = true
-      else if (ch === '"') inString = false
-      continue
-    }
-    if (ch === '"') inString = true
-    else if (ch === '{') depth++
-    else if (ch === '}') {
-      depth--
-      if (depth === 0) return text.slice(start, i + 1)
-    }
-  }
-  return null // unbalanced — likely a still-streaming fragment
-}
-
 /** All tool names the agent can actually execute (built-in + MCP). */
 function knownToolNames(): Set<string> {
   const names = new Set<string>()
@@ -352,165 +330,15 @@ function knownToolNames(): Set<string> {
 }
 
 /**
- * Coerce a parsed JSON object into a ToolCall, accepting the field aliases real
- * models emit (tool/name/tool_name, args/arguments/parameters/input). Returns
- * null when it isn't tool-shaped. When `requireKnown` is set, the tool name must
- * match a real registered tool — used for the embedded-scan path so prose that
- * merely contains a JSON object isn't mistaken for a tool call.
- */
-function objToToolCall(parsed: unknown, requireKnown: boolean): ToolCall | null {
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
-  const obj = parsed as Record<string, unknown>
-  const toolRaw = obj.tool ?? obj.tool_name ?? obj.name
-  if (typeof toolRaw !== 'string' || !toolRaw.trim()) return null
-  const tool = toolRaw.trim()
-  if (requireKnown && !knownToolNames().has(tool)) return null
-
-  const argsRaw = obj.args ?? obj.arguments ?? obj.parameters ?? obj.input
-  const args =
-    typeof argsRaw === 'object' && argsRaw !== null && !Array.isArray(argsRaw)
-      ? (argsRaw as Record<string, unknown>)
-      : {}
-  return { tool, args }
-}
-
-/**
  * Parse a model response into a tool call, or null for a natural-language answer.
  *
- * Robust by design — real models (especially local Ollama models) rarely follow
- * the "respond with ONLY raw JSON" contract. They wrap calls in markdown fences,
- * prepend chatty prose ("Sure, I'll do that: {...}"), or even hallucinate a fake
- * "TOOL RESULT: …" sentence with the real call buried after it. We recover the
- * call in two passes:
- *
- *   1. Fast path — the message is tool-shaped (optionally fenced, then begins
- *      with `{`). Any tool name is accepted here so an unknown/typo'd name still
- *      routes through executeTool → the MCP fallback, preserving prior behaviour.
- *   2. Embedded path — otherwise, scan the whole message for the FIRST balanced
- *      JSON object whose tool field names a REAL registered tool. The
- *      known-tool requirement is what makes this safe: a natural-language answer
- *      that merely mentions JSON, or contains an unrelated `{...}`, is never
- *      executed. This is what rescues "prose then {tool json}" responses.
+ * Thin wrapper over the pure `parseToolCall` in `toolCallParser.ts`; it supplies
+ * the live tool registry (built-in + MCP) so the embedded-recovery pass only
+ * executes JSON that names a real, registered tool. See `toolCallParser.ts` for
+ * the full parsing contract and its unit tests.
  */
 export function parseToolCall(text: string): ToolCall | null {
-  if (!text) return null
-
-  let candidate = text.trim()
-  // Unwrap a full markdown code fence: ```json\n{...}\n```  or  ```\n{...}\n```
-  const fence = candidate.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
-  if (fence) candidate = fence[1].trim()
-
-  // ── Pass 1: clean leading JSON (the contract the prompt asks for) ──────────
-  if (candidate.startsWith('{')) {
-    const jsonText = extractFirstJsonObject(candidate)
-    if (jsonText) {
-      try {
-        const call = objToToolCall(JSON.parse(jsonText), false)
-        if (call) return call
-      } catch {
-        /* fall through to the embedded scan */
-      }
-    }
-  }
-
-  // ── Pass 2: recover a tool call embedded in prose/fences anywhere in text ──
-  // Scan every `{` position; the first balanced object that names a known tool
-  // wins. Bounded by the number of `{` characters, so it's cheap.
-  for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
-    const jsonText = extractFirstJsonObject(text.slice(start))
-    if (!jsonText) continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(jsonText)
-    } catch {
-      continue // unbalanced or invalid here — try the next `{`
-    }
-    const call = objToToolCall(parsed, true)
-    if (call) return call
-  }
-
-  return null
-}
-
-/**
- * Buffers a streaming model response and decides, from the first non-whitespace
- * characters, whether it is a tool call (JSON object, optionally fenced) or a
- * natural-language answer:
- *
- *   • tool-shaped  → WITHHELD from the UI (the user must never see raw tool JSON);
- *   • text-shaped  → flushed and then streamed live, token by token.
- *
- * This is the architectural fix for "the assistant prints JSON": the gate sits
- * between every model transport and the renderer, so JSON can never reach the UI
- * regardless of which provider produced it. `finalize()` performs false-positive
- * recovery — if something looked like JSON but wasn't a real tool call, it is
- * flushed so the user still sees the answer.
- */
-export class StreamGate {
-  private buffer = ''
-  private decided: 'tool' | 'text' | null = null
-  /** Chars of `buffer` already forwarded to the UI (text mode only). */
-  private forwardedLen = 0
-
-  constructor(private readonly forward: (delta: string) => void) {}
-
-  /** Feed one streamed delta. Forwards to the UI only once classified as text. */
-  push = (delta: string): void => {
-    if (!delta) return
-    this.buffer += delta
-
-    if (this.decided === 'tool') return // pure tool JSON — keep withholding entirely
-
-    if (this.decided === null) {
-      // Inspect the leading non-whitespace character(s) to classify the response.
-      const lead = this.buffer.replace(/^\s+/, '')
-      if (lead === '') return // only whitespace so far — wait for more
-      if (lead[0] === '`') {
-        // Possibly the start of a ``` code fence — wait until we can be sure.
-        if (lead.length < 3) return
-        this.decided = 'tool'
-        return
-      }
-      if (lead[0] === '{') {
-        this.decided = 'tool'
-        return
-      }
-      this.decided = 'text' // natural language — fall through to incremental flush
-    }
-
-    // Text mode: stream live, but never reveal a JSON tail. Models often append
-    // a tool call AFTER chatty prose ("Okay! {\"tool\":…}"); we forward only up
-    // to the first `{` and hold the rest until finalize decides whether it was a
-    // real tool call (dropped) or just a stray brace in prose (flushed).
-    this.flushTextUpToJson()
-  }
-
-  /** Forward buffered text up to (but not including) the first `{`. */
-  private flushTextUpToJson(): void {
-    const brace = this.buffer.indexOf('{', this.forwardedLen)
-    const safeEnd = brace === -1 ? this.buffer.length : brace
-    if (safeEnd > this.forwardedLen) {
-      this.forward(this.buffer.slice(this.forwardedLen, safeEnd))
-      this.forwardedLen = safeEnd
-    }
-  }
-
-  /**
-   * Call once the full response is known and classified by the agent.
-   *   • tool-shaped but NOT a real call → reveal everything (false positive);
-   *   • text with a held JSON tail that WASN'T a tool call → reveal the tail;
-   *   • text with a held tail that WAS a tool call → leave it hidden (dropped).
-   */
-  finalize(isToolCall: boolean): void {
-    if (this.decided === 'tool') {
-      if (!isToolCall) this.forward(this.buffer)
-      return
-    }
-    if (this.decided === 'text' && !isToolCall && this.forwardedLen < this.buffer.length) {
-      this.forward(this.buffer.slice(this.forwardedLen))
-      this.forwardedLen = this.buffer.length
-    }
-  }
+  return parseToolCallCore(text, knownToolNames())
 }
 
 /**
@@ -583,6 +411,43 @@ function formatToolResult(call: ToolCall, result: ToolResult): string {
 const DIRECT_PRO_MODEL = 'claude-sonnet-4-6'
 const DIRECT_FREE_MODEL = 'claude-3-5-haiku-latest'
 
+/** Quick reachability check against the local Ollama server (short timeout, never throws). */
+async function isOllamaRunning(): Promise<boolean> {
+  const host = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434'
+  try {
+    const res = await fetch(`${host.replace(/\/$/, '')}/api/tags`, { signal: AbortSignal.timeout(1500) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+async function callOllama(
+  _win: BrowserWindow,
+  messages: Message[],
+  systemPrompt: string,
+  onDelta: (delta: string) => void
+): Promise<string> {
+  const ollama = new Ollama({ host: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434' })
+  const stream = await ollama.chat({
+    model: process.env.OLLAMA_MODEL ?? 'llama3:8b',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      ...messages.map((m) => ({ role: m.role, content: m.content }))
+    ],
+    stream: true
+  })
+  let full = ''
+  for await (const part of stream) {
+    const delta = part.message?.content ?? ''
+    if (delta) {
+      full += delta
+      onDelta(delta)
+    }
+  }
+  return full
+}
+
 async function callAnthropic(
   _win: BrowserWindow,
   messages: Message[],
@@ -638,10 +503,11 @@ async function callEnterprise(
 }
 
 /**
- * Cloud-only model router. Every tier — including Free — is served exclusively
- * by our backend (the chat-proxy Edge Function, our API keys, server-side
- * metering). There is no local-model routing path: nothing a user installs on
- * their own machine can change how a message is billed or capped.
+ * Cloud-first model router. Every tier prefers our backend (the chat-proxy Edge
+ * Function, our API keys, server-side metering). When the cloud path is not
+ * configured or the proxy is unreachable, it falls back to a local Ollama
+ * server if one is running — this trades away bypass-proofing for uptime while
+ * the hosted backend isn't fully provisioned (no server-side LLM key yet).
  *
  * `systemPrompt` is supplied by the caller so the same router drives both the
  * interactive desktop assistant (handleChat) and the autonomous coding agent
@@ -708,9 +574,14 @@ async function routeCloudOrDirect(
   if (process.env.ANTHROPIC_API_KEY) {
     return callAnthropic(win, messages, systemPrompt, DIRECT_FREE_MODEL, onDelta)
   }
-  // No cloud session and no local dev key: surface a neutral connectivity
-  // message. We never instruct the user to install anything — cloud is the
-  // product's only path and a guest session normally guarantees it.
+  // No cloud key on this machine: fall through to a local Ollama server if one
+  // is running, so the app still works pre-launch/pre-signup with zero keys.
+  if (await isOllamaRunning()) {
+    emitLocalUsage(win, tier)
+    return callOllama(win, messages, systemPrompt, onDelta)
+  }
+  // No cloud session, no local key, no local model: surface a neutral
+  // connectivity message rather than a raw error.
   const msg =
     "I couldn't reach the AI service just now. Please check your internet " +
     'connection and try again in a moment.'
@@ -720,12 +591,11 @@ async function routeCloudOrDirect(
 
 /**
  * Last-resort provider call when the cloud proxy is unreachable (e.g. its
- * server-side LLM key is missing/out of credit). Uses a direct provider call
- * ONLY when a local API key is present — i.e. a dev/self-hosted setup. The
- * shipped app ships no key, so this resolves `null` in production and the caller
- * surfaces the friendly cloud message. There is deliberately NO local-model
- * (Ollama) branch: a user must never be able to route around metering by having
- * a local model installed, even when the cloud backend is down. Never throws.
+ * server-side LLM key is missing/out of credit). Tries a direct provider call
+ * when a local API key is present (dev/self-hosted setup), then falls back to
+ * a local Ollama server if one is running, so a broken/unset cloud key never
+ * takes the whole app offline. Resolves `null` (never throws) when neither is
+ * available, and the caller surfaces the friendly cloud-unavailable message.
  */
 async function tryLocalModelFallback(
   win: BrowserWindow,
@@ -734,11 +604,14 @@ async function tryLocalModelFallback(
   systemPrompt: string,
   onDelta: (delta: string) => void
 ): Promise<string | null> {
-  // A direct API key on this machine (dev / self-hosted) is the only fallback.
   if (process.env.ANTHROPIC_API_KEY) {
     emitLocalUsage(win, tier)
     const model = tier === 'free' ? DIRECT_FREE_MODEL : DIRECT_PRO_MODEL
     return callAnthropic(win, messages, systemPrompt, model, onDelta)
+  }
+  if (await isOllamaRunning()) {
+    emitLocalUsage(win, tier)
+    return callOllama(win, messages, systemPrompt, onDelta)
   }
   return null
 }
