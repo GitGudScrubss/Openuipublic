@@ -44,6 +44,11 @@ export default defineConfig(({ mode }) => {
   bake('POSTHOG_API_KEY', env.POSTHOG_API_KEY)
   bake('POSTHOG_HOST', env.POSTHOG_HOST)
   bake('VITE_SERVER_URL', env.VITE_SERVER_URL)
+  // Bake whether THIS build was code-signed (CSC_LINK) and notarizable
+  // (APPLE_TEAM_ID) so the packaged main process can tell, at runtime, whether
+  // Squirrel.Mac/Gatekeeper will accept a silent auto-update — see
+  // src/main/updater/updater.ts. Presence-only signal; no secret material.
+  bake('OPENUI_MAC_SIGNED', env.CSC_LINK && env.APPLE_TEAM_ID ? 'true' : undefined)
 
   return {
     main: {

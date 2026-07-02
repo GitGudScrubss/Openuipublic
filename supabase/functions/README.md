@@ -54,6 +54,9 @@ supabase secrets set \
 # held only here and never shipped in the app.
 # SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided to functions automatically.
 
+# Optional — ops alerting for chat-proxy (see "Alerting" below):
+supabase secrets set ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...
+
 # Waitlist (Mailchimp) — required by the `waitlist` function:
 supabase secrets set \
   MAILCHIMP_API_KEY=xxxxxxxx-us1 \
@@ -83,6 +86,18 @@ Then register the webhook endpoint in the Stripe dashboard
 (`https://<project-ref>.functions.supabase.co/stripe-webhook`) for the events:
 `checkout.session.completed`, `customer.subscription.created`,
 `customer.subscription.updated`, `customer.subscription.deleted`.
+
+## Alerting
+
+`chat-proxy` is a single point of failure for AI chat across every user and
+every tier — a bad/expired/out-of-credit `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY` breaks the product for 100% of signed-in users at once, and
+without alerting the first sign is a support ticket or a churned user. Set
+`ALERT_WEBHOOK_URL` (any incoming webhook that accepts `{"text": "..."}`  —
+Slack, Discord, or a PagerDuty Events API adapter) and the function POSTs
+there on a `502 llm_error` (provider rejected the request — check the key) or
+`500 internal_error` (function crashed), with a 5-minute cooldown per error
+kind so an outage doesn't spam the channel. Leave unset to no-op.
 
 ## Security notes
 

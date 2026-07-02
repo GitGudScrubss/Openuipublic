@@ -23,6 +23,7 @@ import { getCurrentUserId } from './stripe/subscriptionSync'
 import { dailyMessageLimit } from './stripe/pricing'
 import { database } from './database'
 import { sendMessage as serverSendMessage } from './serverClient'
+import { postChatProxyWithRetry } from './chatProxyRetry'
 
 /**
  * Thrown when the cloud `chat-proxy` Edge Function answers with a non-OK status
@@ -155,25 +156,7 @@ export async function callCloudProxy(
     return msg
   }
 
-  let response: Response
-  try {
-    response = await fetch(`${baseUrl.replace(/\/$/, '')}/functions/v1/chat-proxy`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: anonKey,
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
-        system: systemPrompt,
-        modelKey,
-        stream: true
-      })
-    })
-  } catch {
-    throw new Error('I could not reach the AI service. Please check your connection and try again.')
-  }
+  const response = await postChatProxyWithRetry(baseUrl, anonKey, token, messages, systemPrompt, modelKey)
 
   // Daily limit reached → upsell, not an error. Surface remaining=0 + upgrade modal.
   if (response.status === 429) {

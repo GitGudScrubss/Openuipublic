@@ -520,7 +520,7 @@ npm run build:mac    # → dist/OpenUI.dmg (universal arm64 + x64)
 | `WIN_CSC_LINK` | Windows | Base64-encoded EV/OV `.pfx` cert |
 | `WIN_CSC_KEY_PASSWORD` | Windows | Passphrase for the `.pfx` |
 
-All signing secrets are optional — if absent, builds succeed but ship unsigned (Gatekeeper / SmartScreen warnings apply).
+All signing secrets are optional — if absent, builds succeed but ship unsigned (Gatekeeper / SmartScreen warnings apply). The macOS build config carries `hardenedRuntime` + a scoped entitlements file (`resources/entitlements.mac.plist` — JIT + audio-input only) so a signed build is notarizable as-is; `scripts/notarize.js` submits it automatically when the three `APPLE_*` secrets are present. Once signed, the packaged app auto-detects this (`OPENUI_MAC_SIGNED`, baked at build time) and enables silent in-app auto-update on macOS instead of the browser-redirect fallback.
 
 **Icon generation** runs automatically on `npm install` via `scripts/convert-icon.js` (synthesises a 1024×1024 orb PNG, emits `.ico` and `.icns` — no external tooling required).
 
