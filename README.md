@@ -461,9 +461,13 @@ OpenUI uses `electron-updater` backed by GitHub Releases.
 | Platform | Behaviour |
 |---|---|
 | **Windows** | Checks on startup (+30 s), every 4 hours, and on focus. If an update is found, a slim `UpdateBanner` appears. User clicks **Download** → progress bar → **Restart & Install**. |
-| **macOS** | Same check schedule. Because the current build is unsigned, in-app install is not possible. **Open Download Page** opens the GitHub Releases page in the user's browser. |
+| **macOS** | Same check schedule. Beta builds are ad-hoc signed (not notarized), so Squirrel.Mac in-app install is not used — **Open Download Page** opens the GitHub Releases page in the user's browser. First-launch Gatekeeper steps: [docs/INSTALL-MACOS-BETA.md](docs/INSTALL-MACOS-BETA.md). |
 
 Update events are tracked via telemetry (`UPDATE_AVAILABLE`, `UPDATE_DOWNLOADED`, `UPDATE_INSTALL_RESTART`, `UPDATE_ERROR`).
+
+> **When you notarize (GA):** the release workflow already uploads the macOS
+> `.zip` + `latest-mac.yml` that Squirrel.Mac needs for in-app updates. Switch
+> the macOS row above from browser-redirect to in-app install at that point.
 
 ---
 
@@ -520,7 +524,12 @@ npm run build:mac    # → dist/OpenUI.dmg (universal arm64 + x64)
 | `WIN_CSC_LINK` | Windows | Base64-encoded EV/OV `.pfx` cert |
 | `WIN_CSC_KEY_PASSWORD` | Windows | Passphrase for the `.pfx` |
 
-All signing secrets are optional — if absent, builds succeed but ship unsigned (Gatekeeper / SmartScreen warnings apply).
+All signing secrets are optional. If the Apple secrets are absent, the macOS
+build is **ad-hoc signed** by `scripts/notarize.js` (so it still launches on
+Apple Silicon) but not notarized — beta users clear Gatekeeper once via
+[docs/INSTALL-MACOS-BETA.md](docs/INSTALL-MACOS-BETA.md). If the Windows cert is
+absent, the installer is unsigned and SmartScreen shows a "unknown publisher"
+notice. Add the secrets above to get fully signed + notarized GA builds.
 
 **Icon generation** runs automatically on `npm install` via `scripts/convert-icon.js` (synthesises a 1024×1024 orb PNG, emits `.ico` and `.icns` — no external tooling required).
 
