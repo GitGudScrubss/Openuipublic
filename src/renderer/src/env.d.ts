@@ -240,6 +240,8 @@ export interface OpenUIApi {
   // Telemetry.
   setTelemetryOptOut: (optOut: boolean) => Promise<void>
   getTelemetryStatus: () => Promise<boolean>
+  /** Forward a renderer UI event to the main-process PostHog pipe (consent-gated, no-op without a key). */
+  track: (event: string, properties?: Record<string, string | number | boolean | null>) => void
   // Privacy consent — first-launch ConsentModal + Settings analytics toggle.
   grantConsent: () => Promise<ConsentStatus>
   denyConsent: () => Promise<ConsentStatus>
