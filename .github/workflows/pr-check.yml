@@ -1,5 +1,7 @@
 # Runs on every pull request into main to make sure the build isn't broken.
-# Type-checks and builds the app shell on Linux (fast, no packaging step).
+# Type-checks, runs the unit tests, and builds the app shell on Linux (fast, no
+# packaging step). The test step guards the highest-risk logic — the filesystem
+# path-safety gate and the tool-call parser that decides what the LLM may run.
 name: PR Check
 
 on:
@@ -17,4 +19,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
       - run: npm run build
