@@ -10,7 +10,8 @@
  * so there is no new env var to set.
  */
 import { ipcMain } from 'electron'
-import { trackEvent } from './analytics'
+import { trackEvent } from './telemetry/posthog'
+import { Events } from './telemetry/events'
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -73,7 +74,7 @@ export function registerWaitlistIPC(): void {
   ipcMain.handle('openui:join-waitlist', async (_event, email: unknown) => {
     const result = await joinWaitlist(typeof email === 'string' ? email : '')
     if (result.ok && !result.alreadySubscribed) {
-      trackEvent('waitlist_joined', { source: 'desktop_app' })
+      trackEvent(Events.WAITLIST_JOINED, { source: 'desktop_app' })
     }
     return result
   })

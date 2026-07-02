@@ -50,6 +50,7 @@ export const Events = {
   CHECKOUT_CANCELLED: 'checkout_cancelled',
   PORTAL_OPENED: 'portal_opened',
   TIER_CHANGED: 'tier_changed',             // properties: { from_tier, to_tier }
+  WAITLIST_JOINED: 'waitlist_joined',       // properties: { source }
 
   // Telemetry itself
   TELEMETRY_OPT_OUT: 'telemetry_opt_out',
