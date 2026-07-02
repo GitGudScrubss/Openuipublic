@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
+import { Ollama } from 'ollama'
 import { BrowserWindow, ipcMain } from 'electron'
 import { toolSchemas, executeTool, describeToolCall, DESTRUCTIVE_TOOLS, type ToolSchema, type ToolResult, type PendingApprovalResult, type Tier } from './tools'
 import { generatePlan, looksLikeTask, type Plan } from './planner'
@@ -583,6 +584,43 @@ function formatToolResult(call: ToolCall, result: ToolResult): string {
 const DIRECT_PRO_MODEL = 'claude-sonnet-4-6'
 const DIRECT_FREE_MODEL = 'claude-3-5-haiku-latest'
 
+/** Quick reachability check against the local Ollama server (short timeout, never throws). */
+async function isOllamaRunning(): Promise<boolean> {
+  const host = process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434'
+  try {
+    const res = await fetch(`${host.replace(/\/$/, '')}/api/tags`, { signal: AbortSignal.timeout(1500) })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+async function callOllama(
+  _win: BrowserWindow,
+  messages: Message[],
+  systemPrompt: string,
+  onDelta: (delta: string) => void
+): Promise<string> {
+  const ollama = new Ollama({ host: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434' })
+  const stream = await ollama.chat({
+    model: process.env.OLLAMA_MODEL ?? 'llama3:8b',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      ...messages.map((m) => ({ role: m.role, content: m.content }))
+    ],
+    stream: true
+  })
+  let full = ''
+  for await (const part of stream) {
+    const delta = part.message?.content ?? ''
+    if (delta) {
+      full += delta
+      onDelta(delta)
+    }
+  }
+  return full
+}
+
 async function callAnthropic(
   _win: BrowserWindow,
   messages: Message[],
@@ -638,10 +676,11 @@ async function callEnterprise(
 }
 
 /**
- * Cloud-only model router. Every tier — including Free — is served exclusively
- * by our backend (the chat-proxy Edge Function, our API keys, server-side
- * metering). There is no local-model routing path: nothing a user installs on
- * their own machine can change how a message is billed or capped.
+ * Cloud-first model router. Every tier prefers our backend (the chat-proxy Edge
+ * Function, our API keys, server-side metering). When the cloud path is not
+ * configured or the proxy is unreachable, it falls back to a local Ollama
+ * server if one is running — this trades away bypass-proofing for uptime while
+ * the hosted backend isn't fully provisioned (no server-side LLM key yet).
  *
  * `systemPrompt` is supplied by the caller so the same router drives both the
  * interactive desktop assistant (handleChat) and the autonomous coding agent
@@ -708,9 +747,14 @@ async function routeCloudOrDirect(
   if (process.env.ANTHROPIC_API_KEY) {
     return callAnthropic(win, messages, systemPrompt, DIRECT_FREE_MODEL, onDelta)
   }
-  // No cloud session and no local dev key: surface a neutral connectivity
-  // message. We never instruct the user to install anything — cloud is the
-  // product's only path and a guest session normally guarantees it.
+  // No cloud key on this machine: fall through to a local Ollama server if one
+  // is running, so the app still works pre-launch/pre-signup with zero keys.
+  if (await isOllamaRunning()) {
+    emitLocalUsage(win, tier)
+    return callOllama(win, messages, systemPrompt, onDelta)
+  }
+  // No cloud session, no local key, no local model: surface a neutral
+  // connectivity message rather than a raw error.
   const msg =
     "I couldn't reach the AI service just now. Please check your internet " +
     'connection and try again in a moment.'
@@ -720,12 +764,11 @@ async function routeCloudOrDirect(
 
 /**
  * Last-resort provider call when the cloud proxy is unreachable (e.g. its
- * server-side LLM key is missing/out of credit). Uses a direct provider call
- * ONLY when a local API key is present — i.e. a dev/self-hosted setup. The
- * shipped app ships no key, so this resolves `null` in production and the caller
- * surfaces the friendly cloud message. There is deliberately NO local-model
- * (Ollama) branch: a user must never be able to route around metering by having
- * a local model installed, even when the cloud backend is down. Never throws.
+ * server-side LLM key is missing/out of credit). Tries a direct provider call
+ * when a local API key is present (dev/self-hosted setup), then falls back to
+ * a local Ollama server if one is running, so a broken/unset cloud key never
+ * takes the whole app offline. Resolves `null` (never throws) when neither is
+ * available, and the caller surfaces the friendly cloud-unavailable message.
  */
 async function tryLocalModelFallback(
   win: BrowserWindow,
@@ -734,11 +777,14 @@ async function tryLocalModelFallback(
   systemPrompt: string,
   onDelta: (delta: string) => void
 ): Promise<string | null> {
-  // A direct API key on this machine (dev / self-hosted) is the only fallback.
   if (process.env.ANTHROPIC_API_KEY) {
     emitLocalUsage(win, tier)
     const model = tier === 'free' ? DIRECT_FREE_MODEL : DIRECT_PRO_MODEL
     return callAnthropic(win, messages, systemPrompt, model, onDelta)
+  }
+  if (await isOllamaRunning()) {
+    emitLocalUsage(win, tier)
+    return callOllama(win, messages, systemPrompt, onDelta)
   }
   return null
 }
