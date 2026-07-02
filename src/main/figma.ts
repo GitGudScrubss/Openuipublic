@@ -6,20 +6,25 @@
  *   export_figma_frames(file_key, node_ids?)          — PNG export + Claude Vision analysis
  *   create_figma_comment(file_key, message, node_id?) — leave feedback on a file or frame
  *
- * Uses the Figma REST API (authenticated via FIGMA_TOKEN env var).
- * Vision analysis runs against claude-sonnet-4-6 (requires ANTHROPIC_API_KEY).
+ * Uses the Figma REST API, authenticated with a per-user personal access token
+ * that the user supplies in Settings → Figma (falling back to the FIGMA_TOKEN
+ * env var for local dev). A Figma PAT is an inherently user-owned credential, so
+ * — unlike OUR shared LLM keys — the right fix is a Settings field, not a proxy.
+ * Vision analysis runs through the `chat-proxy` Edge Function so OUR Anthropic
+ * key stays server-side (never shipped in the client).
  *
  * SECURITY:
  *   - file_key validated against FILE_KEY_RE before any API call.
  *   - node_ids list bounded + each ID validated against NODE_ID_RE.
  *   - API responses are capped to prevent context flooding.
  *   - Image downloads are HTTPS-only with a size cap and redirect limit.
- *   - FIGMA_TOKEN stays in the main process — never crosses the contextBridge.
+ *   - The Figma token stays in the main process — never crosses the contextBridge.
  */
 
-import Anthropic from '@anthropic-ai/sdk'
 import { request as httpsRequest } from 'node:https'
-import type { ToolResult, ToolSchema } from './tools'
+import type { ExecutorContext, ToolResult, ToolSchema } from './tools'
+import { database } from './database'
+import { callChatProxyText } from './edgeFunctions'
 
 // Figma file keys are base64url strings embedded in figma.com/file/{key}/…
 const FILE_KEY_RE = /^[A-Za-z0-9_-]{4,256}$/
@@ -30,8 +35,11 @@ const NODE_ID_RE = /^\d+:\d+$/
 // Caps to avoid context flooding / runaway Vision API calls.
 const MAX_FILE_SUMMARY_CHARS = 6_000
 const MAX_FRAMES = 3          // max frames analysed per export_figma_frames call
-const MAX_VISION_TOKENS = 1024 // per-frame Vision analysis budget
 const MAX_COMMENT_CHARS = 10_000
+
+// Settings key under which the user's Figma personal access token is stored
+// (via Settings → Figma). Keep in sync with the renderer's SettingsModal.
+export const FIGMA_TOKEN_SETTING_KEY = 'figma_token'
 
 // Hard cap on how many bytes a single frame PNG may be.
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024 // 10 MB
@@ -43,18 +51,29 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024 // 10 MB
  * parsed JSON body.  Throws a descriptive Error on HTTP-level or API-level
  * failures so callers can surface the message without crashing.
  */
+/**
+ * Resolve the Figma personal access token. A Figma PAT is a per-user credential
+ * (unlike OUR shared, server-side LLM keys), so the user supplies their OWN in
+ * Settings → Figma; the FIGMA_TOKEN env var remains a local-dev fallback.
+ */
+export function getFigmaToken(): string {
+  const stored = database.settings.getSetting(FIGMA_TOKEN_SETTING_KEY)
+  if (typeof stored === 'string' && stored.trim()) return stored.trim()
+  return process.env.FIGMA_TOKEN?.trim() ?? ''
+}
+
 function figmaFetch(
   path: string,
   method: 'GET' | 'POST' = 'GET',
   body?: unknown
 ): Promise<unknown> {
-  const token = process.env.FIGMA_TOKEN?.trim() ?? ''
+  const token = getFigmaToken()
   if (!token) {
     return Promise.reject(
       new Error(
-        'FIGMA_TOKEN is not set. Create a personal access token at ' +
-          'figma.com → Account Settings → Personal access tokens, ' +
-          'then set it as the FIGMA_TOKEN environment variable.'
+        'No Figma token configured. Open Settings → Figma and paste a personal ' +
+          'access token (figma.com → Settings → Security → Personal access tokens), ' +
+          'or set the FIGMA_TOKEN environment variable.'
       )
     )
   }
@@ -262,7 +281,10 @@ export async function get_figma_file(args: Record<string, unknown>): Promise<Too
  *
  * If node_ids is omitted the first MAX_FRAMES top-level frames are used.
  */
-export async function export_figma_frames(args: Record<string, unknown>): Promise<ToolResult> {
+export async function export_figma_frames(
+  args: Record<string, unknown>,
+  context?: ExecutorContext
+): Promise<ToolResult> {
   const fileKey = typeof args.file_key === 'string' ? args.file_key.trim() : ''
   const rawNodeIds = typeof args.node_ids === 'string' ? args.node_ids.trim() : ''
 
@@ -328,19 +350,12 @@ export async function export_figma_frames(args: Record<string, unknown>): Promis
         const imageBuffer = await downloadBuffer(imageUrl)
         const base64 = imageBuffer.toString('base64')
 
-        const apiKey = process.env.ANTHROPIC_API_KEY?.trim() ?? ''
-        if (!apiKey) {
-          results.push(
-            `Frame ${nodeId}: exported successfully (Vision analysis skipped — ` +
-              `ANTHROPIC_API_KEY not set). Image size: ${Math.round(imageBuffer.length / 1024)} KB.`
-          )
-          continue
-        }
-
-        const client = new Anthropic({ apiKey })
-        const response = await client.messages.create({
-          model: 'claude-sonnet-4-6',
-          max_tokens: MAX_VISION_TOKENS,
+        // Vision analysis runs through chat-proxy so OUR Anthropic key stays
+        // server-side (chat-proxy accepts Anthropic-style image content blocks).
+        // The tier-scoped modelKey is clamped to the caller's entitlement by the
+        // proxy; a non-signed-in / limit failure throws and is caught below.
+        const analysis = await callChatProxyText({
+          modelKey: context?.tier === 'enterprise' ? 'enterprise-default' : 'pro-default',
           messages: [
             {
               role: 'user',
@@ -363,11 +378,6 @@ export async function export_figma_frames(args: Record<string, unknown>): Promis
             }
           ]
         })
-
-        const analysis = response.content
-          .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-          .map((b) => b.text)
-          .join('\n')
 
         results.push(`=== Frame ${nodeId} Analysis ===\n${analysis}`)
       } catch (frameErr) {
@@ -455,7 +465,7 @@ export const figmaToolSchemas: ToolSchema[] = [
     description:
       'Fetch metadata from a Figma file: its name, last-modified date, and the full list of ' +
       'top-level frames (with node IDs and page names). Call this first to discover which frames ' +
-      'to pass to export_figma_frames. Requires FIGMA_TOKEN env var.',
+      'to pass to export_figma_frames. Requires a Figma token (set it in Settings → Figma).',
     parameters: {
       type: 'object',
       properties: {
@@ -475,7 +485,7 @@ export const figmaToolSchemas: ToolSchema[] = [
       'Export Figma frames as PNG images and analyse each one with Claude Vision (claude-sonnet-4-6). ' +
       'Returns a structured per-frame design review: layout, colour/contrast, typography, ' +
       'accessibility issues, and 3–5 concrete improvement suggestions. ' +
-      'Requires FIGMA_TOKEN and ANTHROPIC_API_KEY. ' +
+      'Requires a Figma token (set it in Settings → Figma); vision analysis runs server-side. ' +
       'If node_ids is omitted the first 3 top-level frames are analysed automatically.',
     parameters: {
       type: 'object',
@@ -499,7 +509,7 @@ export const figmaToolSchemas: ToolSchema[] = [
     description:
       'Post a comment on a Figma file, optionally anchored to a specific frame or node. ' +
       'Use after export_figma_frames to leave AI-generated design feedback directly in Figma, ' +
-      'visible to the whole design team. Requires FIGMA_TOKEN env var.',
+      'visible to the whole design team. Requires a Figma token (set it in Settings → Figma).',
     parameters: {
       type: 'object',
       properties: {
@@ -523,9 +533,11 @@ export const figmaToolSchemas: ToolSchema[] = [
   }
 ]
 
-export const figmaRegistry: Record<string, (args: Record<string, unknown>) => Promise<ToolResult>> =
-  {
-    get_figma_file,
-    export_figma_frames,
-    create_figma_comment
-  }
+export const figmaRegistry: Record<
+  string,
+  (args: Record<string, unknown>, context?: ExecutorContext) => Promise<ToolResult>
+> = {
+  get_figma_file,
+  export_figma_frames,
+  create_figma_comment
+}
