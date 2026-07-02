@@ -460,6 +460,12 @@ const api = {
   // Aggregate dataset stats for a settings/insights panel.
   getTrainingStats: (): Promise<TrainingStats> =>
     ipcRenderer.invoke('openui:training:stats'),
+
+  // ── Client-side telemetry ──────────────────────────────────────────────────
+  // Fire-and-forget forward of a renderer UI event to the main-process PostHog
+  // pipe. Consent-gated and a no-op without POSTHOG_API_KEY on the main side.
+  track: (event: string, properties?: Record<string, string | number | boolean | null>): void =>
+    ipcRenderer.send('openui:telemetry:track', { event, properties }),
 }
 
 export type OpenUIApi = typeof api

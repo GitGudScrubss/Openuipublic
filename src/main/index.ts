@@ -33,6 +33,11 @@ import {
   isRecording,
   type RecorderAction,
 } from './recorder'
+import { installCrashReporter } from './telemetry/crashReporter'
+
+// Capture uncaught main-process errors as early as possible — before any of the
+// setup below can throw — so startup crashes are logged and reported too.
+installCrashReporter()
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
@@ -387,6 +392,24 @@ app.whenReady().then(async () => {
     setTelemetryOptOut(optOut === true)
   })
   ipcMain.handle('openui:get-telemetry-status', () => isTelemetryActive())
+
+  // Renderer UI events → main-process PostHog pipe. `trackEvent` is itself
+  // consent-gated and a no-op without a key, but we still validate the payload
+  // here so a forged IPC message can't push arbitrary/huge values through.
+  ipcMain.on('openui:telemetry:track', (_event, payload: unknown) => {
+    if (typeof payload !== 'object' || payload === null) return
+    const { event, properties } = payload as Record<string, unknown>
+    if (typeof event !== 'string' || event.length === 0 || event.length > 128) return
+    const safeProps: Record<string, string | number | boolean> = {}
+    if (properties && typeof properties === 'object') {
+      for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+        if (value === null) continue
+        if (typeof value === 'string') safeProps[key] = value.slice(0, 512)
+        else if (typeof value === 'number' || typeof value === 'boolean') safeProps[key] = value
+      }
+    }
+    trackEvent(event, { ...safeProps, source: 'renderer' })
+  })
 
   // ── Privacy consent IPC ───────────────────────────────────────────────────────
   ipcMain.handle('openui:grant-consent', async () => {

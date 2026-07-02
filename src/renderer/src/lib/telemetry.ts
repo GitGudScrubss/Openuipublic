@@ -1,20 +1,39 @@
 /**
  * Lightweight client-side telemetry.
  *
- * There is no analytics backend wired up yet, so this is intentionally a thin
- * stub: it normalises the call shape and logs in development so events are
- * observable while building. When a provider is chosen (PostHog, Segment, or an
- * IPC bridge to the main process), swap the body of `track()` — every call site
- * already passes a stable event name + flat property bag.
+ * Renderer UI events are forwarded over IPC (`window.openui.track`) to the
+ * main-process PostHog pipe (`src/main/telemetry/posthog.ts`), which is
+ * consent-gated and a silent no-op when `POSTHOG_API_KEY` is unset. Every call
+ * site passes a stable event name + a flat, primitive property bag. In dev we
+ * also log to the console so events stay observable while building.
  */
 
 export type TelemetryValue = string | number | boolean | null | undefined
 export type TelemetryProperties = Record<string, TelemetryValue>
+
+/** Drop `undefined` values so the IPC payload is a clean primitive bag. */
+function normalize(
+  properties?: TelemetryProperties
+): Record<string, string | number | boolean | null> | undefined {
+  if (!properties) return undefined
+  const out: Record<string, string | number | boolean | null> = {}
+  for (const [key, value] of Object.entries(properties)) {
+    if (value !== undefined) out[key] = value
+  }
+  return out
+}
 
 export function track(event: string, properties?: TelemetryProperties): void {
   if (import.meta.env.DEV) {
     // eslint-disable-next-line no-console
     console.debug('[telemetry]', event, properties ?? {})
   }
-  // TODO: forward to a real analytics sink once one is configured.
+  // Forward to the main process. Guarded because the preload bridge is absent
+  // in non-Electron contexts (e.g. unit tests) — telemetry must never throw
+  // into a UI flow.
+  try {
+    window.openui?.track(event, normalize(properties))
+  } catch {
+    /* ignore — analytics is best-effort */
+  }
 }

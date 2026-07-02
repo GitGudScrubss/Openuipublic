@@ -14,10 +14,23 @@
 import { BrowserWindow } from 'electron'
 import { getSupabaseClient, isSupabaseConfigured } from './supabaseClient'
 import { database, type UserRow } from '../database'
+import { getSetting, setSetting } from '../database/repositories/settingsRepo'
 import { resetTelemetryIdentity } from '../telemetry/posthog'
 
 /** Settings key under which the signed-in user's id is stored. */
 export const ACTIVE_USER_KEY = 'auth.active_user_id'
+
+/**
+ * Guest-session abuse guard. Each anonymous sign-in mints a brand-new Supabase
+ * user with its own free-tier quota, so an uncapped mint path lets a loop (or a
+ * user repeatedly clearing local data) spin up unlimited fresh free accounts and
+ * drain our API budget. We cap fresh mints per rolling window on this device.
+ * This is a client-side backstop only — authoritative per-IP/device enforcement
+ * belongs in the `chat-proxy` Edge Function.
+ */
+const GUEST_MINT_WINDOW_SEC = 24 * 60 * 60 // 24h rolling window
+const GUEST_MINT_MAX = 5 // fresh guests allowed per window (a real user needs 1)
+const GUEST_MINT_KEY = 'auth.guest_mint_log' // { windowStart: number; count: number }
 
 /** Refresh proactively this often. */
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes
@@ -124,12 +137,52 @@ export async function refreshSession(): Promise<boolean> {
  *
  * Returns true when a session (existing or freshly created) is in place.
  */
+/** Read the rolling guest-mint log, resetting it when the window has elapsed. */
+function readGuestMintLog(): { windowStart: number; count: number } {
+  const now = nowSeconds()
+  const raw = getSetting(GUEST_MINT_KEY)
+  if (raw && typeof raw === 'object') {
+    const log = raw as { windowStart?: unknown; count?: unknown }
+    const windowStart = typeof log.windowStart === 'number' ? log.windowStart : 0
+    const count = typeof log.count === 'number' ? log.count : 0
+    if (now - windowStart < GUEST_MINT_WINDOW_SEC) return { windowStart, count }
+  }
+  return { windowStart: now, count: 0 }
+}
+
+/** True when another anonymous account may be minted on this device right now. */
+function canMintGuest(): boolean {
+  try {
+    return readGuestMintLog().count < GUEST_MINT_MAX
+  } catch {
+    // If the settings read fails, fail open so a real user is never blocked.
+    return true
+  }
+}
+
+/** Record that a fresh anonymous account was (attempted to be) minted. */
+function recordGuestMint(): void {
+  try {
+    const log = readGuestMintLog()
+    setSetting(GUEST_MINT_KEY, { windowStart: log.windowStart, count: log.count + 1 })
+  } catch {
+    /* best-effort — never block the mint on a bookkeeping failure */
+  }
+}
+
 export async function ensureGuestSession(win?: BrowserWindow | null): Promise<boolean> {
   if (isAuthenticated()) return true
   if (!isSupabaseConfigured()) return false
+  if (!canMintGuest()) {
+    console.warn(
+      '[openui] Guest sign-in throttled: too many anonymous accounts minted on this device recently.'
+    )
+    return false
+  }
 
   try {
     const supabase = getSupabaseClient()
+    recordGuestMint() // count the attempt up-front so failures still spend budget
     const { data, error } = await supabase.auth.signInAnonymously()
     const session = data?.session
     const user = data?.user
