@@ -25,6 +25,7 @@ import { promisify } from 'node:util'
 import { readFile, writeFile, mkdir, rename, copyFile, unlink, readdir, stat } from 'node:fs/promises'
 import { resolve as resolvePath, join as joinPath, dirname, sep } from 'node:path'
 import { homedir } from 'node:os'
+import { SENSITIVE_PATH_RE, resolveSafePath } from './fs/pathSafety'
 import { desktopCapturer, clipboard, shell } from 'electron'
 import Anthropic from '@anthropic-ai/sdk'
 import { checkAccessibility, type PermissionTarget } from './permissions'
@@ -295,16 +296,10 @@ const WIN_BLOCKED_APPS = new Set([
   'regedit', 'regedt32', 'reg', 'bcdedit', 'wmic'
 ])
 
-/**
- * search_files result paths under these segments are withheld from the model.
- * They sit INSIDE the user's home folder (so confining the search to $HOME does
- * not exclude them) yet hold credentials, tokens and browser profiles —
- * AppData\Roaming on Windows, ~/.ssh, ~/.aws and friends elsewhere. search_files
- * only ever returns paths, so dropping these keeps the model from enumerating
- * sensitive material it has no need to see.
- */
-const SENSITIVE_PATH_RE =
-  /(^|[\\/])(AppData|\.ssh|\.aws|\.gnupg|\.azure|\.kube|\.docker|Library[\\/]Keychains)([\\/]|$)/i
+// SENSITIVE_PATH_RE + resolveSafePath live in ./fs/pathSafety so the filesystem
+// trust boundary can be unit-tested without importing this heavyweight module.
+// search_files also uses SENSITIVE_PATH_RE to withhold credential/token paths
+// (AppData, ~/.ssh, ~/.aws …) from the model, even though they sit inside $HOME.
 
 /** Lazily load nut-js, falling back to the community fork (same public API). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -971,45 +966,6 @@ const MAX_FILE_BYTES = 512 * 1024 // 512 KiB
 const MAX_DIR_ENTRIES = 200
 
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
-
-/**
- * Resolve an LLM-supplied path to an absolute path and enforce the filesystem
- * trust boundary. This is the equivalent of validateArgs for paths — model
- * output may be steered by prompt injection, so every path crosses this gate.
- *
- * • A leading "~" expands to the user's home directory.
- * • Credential / secret directories (SENSITIVE_PATH_RE: .ssh, .aws, AppData,
- *   Keychains …) are always rejected, for reads and writes alike.
- * • Mutating tools (write/mkdir/move/copy/delete) are additionally confined to
- *   the home directory tree, so an injected model cannot create, overwrite, or
- *   delete files anywhere in the system — only inside the user's own space.
- *
- * Returns the absolute path, or throws Error with a user-safe message.
- */
-function resolveSafePath(raw: unknown, opts: { mutating: boolean }): string {
-  if (typeof raw !== 'string' || !raw.trim()) {
-    throw new Error('a non-empty string "path" is required.')
-  }
-  const input = raw.trim()
-  if (input.length > 1024) throw new Error('"path" is too long.')
-  const expanded =
-    input === '~' || input.startsWith('~/') || input.startsWith('~\\')
-      ? joinPath(homedir(), input.slice(1))
-      : input
-  const abs = resolvePath(expanded)
-  if (SENSITIVE_PATH_RE.test(abs)) {
-    throw new Error('that path is off-limits — it holds credentials or secrets.')
-  }
-  if (opts.mutating) {
-    const home = resolvePath(homedir())
-    if (abs !== home && !abs.startsWith(home + sep)) {
-      throw new Error(
-        `for safety, files can only be created, moved, copied, or deleted inside your home folder (${home}).`
-      )
-    }
-  }
-  return abs
-}
 
 /** List the entries of a directory (files and sub-folders). Read-only. */
 async function list_directory(args: Record<string, unknown>): Promise<ToolResult> {
