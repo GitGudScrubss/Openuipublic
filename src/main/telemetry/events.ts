@@ -7,6 +7,8 @@ export const Events = {
   APP_CLOSED: 'app_closed',               // properties: { session_duration_seconds }
   APP_HEARTBEAT: 'app_heartbeat',         // properties: { interval_seconds } — emitted once per active interval while a window is focused; count × interval ≈ time-in-app
   APP_UPDATED: 'app_updated',             // properties: { previous_version, new_version }
+  APP_CRASH: 'app_crash',                 // properties: { kind, message, frame } — main-process uncaught error
+  RENDERER_ERROR: 'renderer_error',       // properties: { message, source, line, col } — uncaught renderer error
 
   // Auto-update (electron-updater)
   UPDATE_AVAILABLE: 'update_available',           // properties: { current_version, new_version }

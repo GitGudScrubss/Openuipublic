@@ -33,6 +33,11 @@ import {
   isRecording,
   type RecorderAction,
 } from './recorder'
+import { installCrashReporter } from './telemetry/crashReporter'
+
+// Capture uncaught main-process errors as early as possible — before any of the
+// setup below can throw — so startup crashes are logged and reported too.
+installCrashReporter()
 
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
