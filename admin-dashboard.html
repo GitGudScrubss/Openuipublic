@@ -1,4 +1,16 @@
 <!DOCTYPE html>
+<!--
+  admin-dashboard.html — STANDALONE INTERNAL TOOL (not part of the Electron build).
+
+  This is a self-contained, live admin dashboard: open it directly in a browser
+  and it queries the OpenUI Supabase backend for user/subscription metrics. It is
+  NOT bundled with the desktop app (the app lives in src/renderer) and is not
+  served by any deploy pipeline — it runs only when a maintainer opens it locally.
+
+  BEFORE USE: fill in the SUPABASE_URL / admin-key placeholders in the <script>
+  block below (they ship as "YOUR_SUPABASE_URL" etc. so no secrets live in git).
+  Keep this file maintained as long as the admin metrics endpoints exist.
+-->
 <html lang="en">
 <head>
   <meta charset="UTF-8">

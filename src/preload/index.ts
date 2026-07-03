@@ -159,6 +159,14 @@ const api = {
     return (): void => { ipcRenderer.removeListener('openui:voice:transcript', fn) }
   },
 
+  // Fired when a free-tier screen read downgrades to local OCR (vs. Claude
+  // Vision). The renderer shows a one-line hint explaining the tier limit.
+  onScreenOcrFallback: (cb: () => void): (() => void) => {
+    const fn = (() => cb()) as IpcListener
+    ipcRenderer.on('openui:screen:ocr-fallback', fn)
+    return (): void => { ipcRenderer.removeListener('openui:screen:ocr-fallback', fn) }
+  },
+
   onPermissionDenied: (cb: (permission: PermissionTarget) => void): (() => void) => {
     const fn = wrap<PermissionTarget>(cb)
     ipcRenderer.on('openui:permission:denied', fn)

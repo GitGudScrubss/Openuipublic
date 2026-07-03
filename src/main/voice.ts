@@ -6,6 +6,7 @@ import { getUserTier, getCurrentUser } from './auth/sessionManager'
 import { getDb } from './database/init'
 import { monthlyVoiceMinuteLimit } from './stripe/pricing'
 import { callEdgeFunction } from './edgeFunctions'
+import { decodeAudioDurationSeconds } from './audioDuration'
 import { trackEvent } from './telemetry/posthog'
 import { Events } from './telemetry/events'
 
@@ -216,8 +217,15 @@ export function registerVoiceIPC(win: BrowserWindow): void {
       return
     }
 
-    // Rough duration estimate: compressed audio at ~12 KB/s
-    const durationSeconds = Math.round(audioBuffer.byteLength / 12000)
+    // Meter against the real decoded duration parsed from the audio container
+    // header (WAV/Ogg/WebM). Fall back to a compressed-bitrate estimate
+    // (~12 KB/s) only when the header lacks timing info, so the monthly voice
+    // cap is charged in true seconds rather than bytes.
+    const decodedSeconds = decodeAudioDurationSeconds(audioBuffer)
+    const durationSeconds =
+      decodedSeconds !== null && decodedSeconds > 0
+        ? Math.round(decodedSeconds)
+        : Math.round(audioBuffer.byteLength / 12000)
     recordVoiceUsage(userId, durationSeconds)
     trackEvent(Events.VOICE_RECORDING_COMPLETED, {
       duration_seconds: durationSeconds,

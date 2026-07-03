@@ -1,4 +1,19 @@
 <!DOCTYPE html>
+<!--
+  design.html — DUAL PURPOSE, but NOT part of the Electron app build.
+
+  1) It is the ORIGINAL design prototype the React renderer was ported from —
+     src/renderer/src/index.css, hooks/useAssistantAnimations.ts, and
+     components/TaskListPopup.tsx all cite it as their visual source of truth.
+     Treat it as the reference mockup: change it when the design language moves.
+
+  2) It doubles as the public marketing / download landing page: the download
+     dock fetches the latest GitHub Release and the form posts to the waitlist
+     Edge Function, so those parts ARE live when the page is hosted.
+
+  The desktop app itself renders from src/renderer, not this file. This page is
+  standalone (served/opened on its own) and is not bundled by electron-vite.
+-->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
