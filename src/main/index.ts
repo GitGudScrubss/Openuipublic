@@ -558,8 +558,105 @@ app.whenReady().then(async () => {
   })
 })
 
+// ── MCP connect: input validation (defense in depth) ─────────────────────────
+// There is currently no UI path that reaches this handler, but any renderer (or a
+// compromised one) could invoke it. We fully validate the untrusted `config`
+// before it reaches connectMcpServer(), which would otherwise spawn an arbitrary
+// local process for the stdio transport.
+
+// Only these executables may launch a stdio MCP server. Matched against the
+// command's basename (path and .exe/.cmd/.bat extension stripped, lower-cased),
+// so both "node", "/usr/bin/node", and "C:\\...\\node.exe" resolve to "node".
+const ALLOWED_MCP_STDIO_COMMANDS = new Set([
+  'npx',
+  'node',
+  'python',
+  'python3',
+  'uv',
+  'uvx',
+  'deno',
+  'bun',
+  'pnpm',
+])
+
+const MCP_STDIO_EXECUTABLE_EXT = /\.(exe|cmd|bat)$/i
+
+/** Reduce a command string to the lower-cased basename used for allowlisting. */
+function mcpCommandBasename(command: string): string {
+  // Split on both POSIX and Windows path separators.
+  const base = command.split(/[\\/]/).pop() ?? command
+  return base.replace(MCP_STDIO_EXECUTABLE_EXT, '').toLowerCase()
+}
+
+// http/https only — file:, javascript:, data: etc. could read local files or
+// otherwise escape the intended SSE transport.
+const MCP_SSE_URL_SCHEME = /^https?:\/\//i
+
+/**
+ * Validate an untrusted MCP server config from the renderer. Returns the config
+ * narrowed to McpServerConfig on success, or an error message describing the
+ * first validation failure.
+ */
+function validateMcpConfig(
+  config: unknown
+): { ok: true; config: McpServerConfig } | { ok: false; error: string } {
+  if (typeof config !== 'object' || config === null) {
+    return { ok: false, error: 'MCP config must be an object.' }
+  }
+  const c = config as Record<string, unknown>
+
+  if (typeof c.name !== 'string' || !c.name.trim()) {
+    return { ok: false, error: 'MCP config requires a non-empty "name" string.' }
+  }
+
+  if (c.type !== 'stdio' && c.type !== 'sse') {
+    return { ok: false, error: 'MCP config "type" must be "stdio" or "sse".' }
+  }
+
+  if (c.type === 'stdio') {
+    if (typeof c.command !== 'string' || !c.command.trim()) {
+      return { ok: false, error: 'stdio MCP config requires a non-empty "command" string.' }
+    }
+    if (!ALLOWED_MCP_STDIO_COMMANDS.has(mcpCommandBasename(c.command.trim()))) {
+      return {
+        ok: false,
+        error: `stdio MCP command "${c.command}" is not in the allowlist of permitted commands.`,
+      }
+    }
+    if (c.args !== undefined) {
+      if (!Array.isArray(c.args) || !c.args.every((a) => typeof a === 'string')) {
+        return { ok: false, error: 'stdio MCP "args" must be an array of strings.' }
+      }
+    }
+    if (c.env !== undefined) {
+      if (
+        typeof c.env !== 'object' ||
+        c.env === null ||
+        Array.isArray(c.env) ||
+        !Object.values(c.env).every((v) => typeof v === 'string')
+      ) {
+        return { ok: false, error: 'stdio MCP "env" must be a string→string map.' }
+      }
+    }
+  } else {
+    // sse
+    if (typeof c.url !== 'string' || !c.url.trim()) {
+      return { ok: false, error: 'sse MCP config requires a non-empty "url" string.' }
+    }
+    if (!MCP_SSE_URL_SCHEME.test(c.url.trim())) {
+      return { ok: false, error: 'sse MCP "url" must be an http:// or https:// URL.' }
+    }
+  }
+
+  return { ok: true, config: config as McpServerConfig }
+}
+
 ipcMain.handle('openui:mcp:connect', async (_event, config: unknown) => {
-  return connectMcpServer(config as McpServerConfig)
+  const validated = validateMcpConfig(config)
+  if (!validated.ok) {
+    return { ok: false, error: validated.error }
+  }
+  return connectMcpServer(validated.config)
 })
 
 app.on('before-quit', () => {
