@@ -26,7 +26,7 @@ import { readFile, writeFile, mkdir, rename, copyFile, unlink, readdir, stat } f
 import { resolve as resolvePath, join as joinPath, dirname, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { SENSITIVE_PATH_RE, resolveSafePath } from './fs/pathSafety'
-import { desktopCapturer, clipboard, shell } from 'electron'
+import { desktopCapturer, clipboard, shell, BrowserWindow } from 'electron'
 import { checkAccessibility, type PermissionTarget } from './permissions'
 import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
@@ -733,6 +733,18 @@ async function type_text(args: Record<string, unknown>): Promise<ToolResult> {
  * Security → Screen Recording). On Windows, Electron's desktopCapturer works
  * without additional OS permissions.
  */
+/**
+ * Tell the renderer that a screen read fell back to local OCR (free tier)
+ * instead of Claude Vision, so it can surface a one-line "this is a tier limit,
+ * not a bug" hint. Fire-and-forget: broadcast to every live window (read_screen
+ * has no window handle of its own), mirroring the auth/deeplink emit pattern.
+ */
+function notifyOcrFallback(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send('openui:screen:ocr-fallback')
+  }
+}
+
 async function read_screen(
   _args: Record<string, unknown>,
   context?: ExecutorContext
@@ -807,6 +819,10 @@ async function read_screen(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     })) as { data: { text: string } }
     trackEvent(Events.SCREEN_CAPTURED, { tier: 'free', method: 'local_ocr' })
+    // Proactively tell the UI this read used local OCR, not Claude Vision —
+    // so the user understands the coarser result is a free-tier limit, not a
+    // bug. The renderer (LocalAIStatus) shows a dismissible one-line hint.
+    notifyOcrFallback()
     return {
       ok: true,
       output:

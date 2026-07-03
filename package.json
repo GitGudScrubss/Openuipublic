@@ -1,7 +1,7 @@
 {
     "name": "openui",
     "version": "7.0.4",
-    "description": "OpenUI â€” a macOS menu-bar AI assistant (Electron + Vite + React + TypeScript)",
+    "description": "OpenUI — a cross-platform (Windows + macOS) menu-bar / system-tray AI assistant (Electron + Vite + React + TypeScript)",
     "main": "./out/main/index.js",
     "author": "OpenUI",
     "license": "MIT",

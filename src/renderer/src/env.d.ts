@@ -196,6 +196,8 @@ export interface OpenUIApi {
   transcribeAndChat: (audio: ArrayBuffer, mimeType: string, tier: Tier) => Promise<void>
   onTranscript: (cb: (text: string) => void) => () => void
 
+  // Fired when a free-tier screen read falls back to local OCR (vs. Cloud Vision).
+  onScreenOcrFallback: (cb: () => void) => () => void
   // OS Permissions
   onPermissionDenied: (cb: (permission: PermissionTarget) => void) => () => void
   openSettings: (permission: PermissionTarget) => void
