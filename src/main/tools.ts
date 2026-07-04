@@ -26,7 +26,7 @@ import { readFile, writeFile, mkdir, rename, copyFile, unlink, readdir, stat } f
 import { resolve as resolvePath, join as joinPath, dirname, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { SENSITIVE_PATH_RE, resolveSafePath } from './fs/pathSafety'
-import { desktopCapturer, clipboard, shell, BrowserWindow } from 'electron'
+import { app, desktopCapturer, clipboard, shell, BrowserWindow } from 'electron'
 import { checkAccessibility, type PermissionTarget } from './permissions'
 import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
@@ -383,29 +383,67 @@ function loadNut(): any {
 
 // ── Playwright browser automation ─────────────────────────────────────────────
 
-// Singleton headful Chromium browser and page.  null before the first
-// browser_navigate call, or after the browser is closed/crashed.
+// Singleton headful browser CONTEXT (persistent profile) and page. null before
+// the first browser_navigate call, or after the browser is closed/crashed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _pwBrowser: any = null
+let _pwContext: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _pwPage: any = null
 
 /**
- * Lazy-load Playwright (must be `npm install`-ed separately, along with
- * `npx playwright install chromium`) and return the shared Page, launching a
- * headful Chromium window if none is already open.  The same browser window
- * persists across tool calls so the user can watch OpenUI work.
+ * Browser channels tried, in order, when launching the automation browser.
+ * We prefer the user's REAL installed browser (Edge, then Chrome) so the window
+ * looks and behaves like their normal browser; `undefined` falls back to
+ * Playwright's bundled Chromium when neither is installed.
+ */
+const BROWSER_CHANNELS: (string | undefined)[] = IS_WIN
+  ? ['msedge', 'chrome', undefined]
+  : ['chrome', 'msedge', undefined]
+
+/**
+ * Lazy-load Playwright (must be `npm install`-ed separately) and return the
+ * shared Page, launching a headful window if none is already open.
+ *
+ * This drives the user's REAL installed browser (Edge/Chrome via a Playwright
+ * channel) inside a PERSISTENT profile stored under the app's userData dir — not
+ * a throwaway "guest" Chromium. That means cookies/logins survive across runs,
+ * so the user can sign in once and the automation window stays useful instead of
+ * being an empty test browser. The same window persists across tool calls so the
+ * user can watch OpenUI work.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getOrCreatePage(): Promise<any> {
   if (_pwPage) return _pwPage
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pw = requireFirst(['playwright']) as any
-  _pwBrowser = await pw.chromium.launch({ headless: false })
-  _pwPage = await _pwBrowser.newPage()
+
+  // A dedicated, persistent profile dir keeps logins/cookies between sessions.
+  // It is separate from the user's live browser profile (which is locked while
+  // their browser is open), so launching never conflicts with normal browsing.
+  const profileDir = joinPath(app.getPath('userData'), 'browser-profile')
+
+  let lastErr: unknown = null
+  for (const channel of BROWSER_CHANNELS) {
+    try {
+      _pwContext = await pw.chromium.launchPersistentContext(profileDir, {
+        headless: false,
+        channel,
+        viewport: null,
+        args: ['--start-maximized', '--no-first-run', '--no-default-browser-check']
+      })
+      break
+    } catch (err) {
+      lastErr = err // channel not installed — try the next one
+    }
+  }
+  if (!_pwContext) {
+    throw lastErr instanceof Error ? lastErr : new Error('Failed to launch a browser')
+  }
+
+  _pwPage = _pwContext.pages()[0] ?? (await _pwContext.newPage())
   // Reset state if the browser is closed by the user or crashes.
-  _pwBrowser.on('disconnected', () => {
-    _pwBrowser = null
+  _pwContext.on('close', () => {
+    _pwContext = null
     _pwPage = null
   })
   return _pwPage
@@ -413,16 +451,16 @@ async function getOrCreatePage(): Promise<any> {
 
 /**
  * Gracefully close the Playwright browser.  Should be called from the main
- * process before the Electron app quits so Chromium exits cleanly.
+ * process before the Electron app quits so the browser exits cleanly.
  */
 export async function closeBrowser(): Promise<void> {
-  if (_pwBrowser) {
+  if (_pwContext) {
     try {
-      await _pwBrowser.close()
+      await _pwContext.close()
     } catch {
       // ignore — process exit will kill the child anyway
     }
-    _pwBrowser = null
+    _pwContext = null
     _pwPage = null
   }
 }
