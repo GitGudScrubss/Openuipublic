@@ -26,7 +26,7 @@ import { readFile, writeFile, mkdir, rename, copyFile, unlink, readdir, stat } f
 import { resolve as resolvePath, join as joinPath, dirname, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { SENSITIVE_PATH_RE, resolveSafePath } from './fs/pathSafety'
-import { desktopCapturer, clipboard, shell, BrowserWindow } from 'electron'
+import { app, desktopCapturer, clipboard, shell, BrowserWindow } from 'electron'
 import { checkAccessibility, type PermissionTarget } from './permissions'
 import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
@@ -296,6 +296,80 @@ const WIN_BLOCKED_APPS = new Set([
   'regedit', 'regedt32', 'reg', 'bcdedit', 'wmic'
 ])
 
+/**
+ * PowerShell resolver for open_app on Windows. A plain `Start-Process -FilePath
+ * <name>` only works for a full path or an executable already on PATH — it fails
+ * for Store/UWP apps (WhatsApp, Spotify, WhatsApp Desktop) and for desktop apps
+ * whose .exe isn't on PATH. This script resolves a friendly name the way a user
+ * would from the Start menu, trying each strategy in order and stopping at the
+ * first that launches:
+ *   1. A literal existing path (full path passed straight through).
+ *   2. An installed app matched by display name via Get-StartApps — this covers
+ *      both Store/UWP apps (launched via shell:AppsFolder\<AppUserModelID>) and
+ *      registered desktop apps.
+ *   3. A Start-menu shortcut (.lnk) whose name matches.
+ *   4. A last-resort Start-Process so PATH names (notepad, msedge, code) still work.
+ *
+ * SECURITY: the untrusted app name is read only as the VALUE `$env:OPENUI_APP`
+ * (supplied via extraEnv) and is never spliced into the script text, so it cannot
+ * be re-parsed as PowerShell code. open_app also whitelists the name against
+ * APP_NAME_RE (no `*?[]` wildcards) before this runs.
+ */
+const WIN_OPEN_APP_SCRIPT = `
+$ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+$app = $env:OPENUI_APP
+if ([string]::IsNullOrWhiteSpace($app)) { Write-Error 'No application name provided.'; exit 1 }
+
+# 1) A literal file/path that exists — launch it directly.
+if (Test-Path -LiteralPath $app) {
+  Start-Process -FilePath $app
+  Write-Output 'path'
+  exit 0
+}
+
+# 2) Match an installed app by display name (covers Store/UWP + registered desktop apps).
+$match = $null
+try {
+  $apps = Get-StartApps
+  $match = $apps | Where-Object { $_.Name -ieq $app } | Select-Object -First 1
+  if (-not $match) { $match = $apps | Where-Object { $_.Name -like ('*' + $app + '*') } | Select-Object -First 1 }
+} catch { }
+if ($match) {
+  Start-Process ('shell:AppsFolder\\' + $match.AppID)
+  Write-Output ('app: ' + $match.Name)
+  exit 0
+}
+
+# 3) A Start-menu shortcut (.lnk) whose name matches.
+$roots = @(
+  (Join-Path $env:ProgramData 'Microsoft\\Windows\\Start Menu\\Programs'),
+  (Join-Path $env:AppData 'Microsoft\\Windows\\Start Menu\\Programs')
+)
+foreach ($root in $roots) {
+  if (Test-Path -LiteralPath $root) {
+    $links = Get-ChildItem -LiteralPath $root -Recurse -Filter *.lnk -ErrorAction SilentlyContinue
+    $lnk = $links | Where-Object { $_.BaseName -ieq $app } | Select-Object -First 1
+    if (-not $lnk) { $lnk = $links | Where-Object { $_.BaseName -like ('*' + $app + '*') } | Select-Object -First 1 }
+    if ($lnk) {
+      Start-Process -FilePath $lnk.FullName
+      Write-Output ('shortcut: ' + $lnk.BaseName)
+      exit 0
+    }
+  }
+}
+
+# 4) Last resort: let Start-Process resolve it on PATH (notepad, calc, msedge, code...).
+try {
+  Start-Process -FilePath $app -ErrorAction Stop
+  Write-Output 'path'
+  exit 0
+} catch {
+  Write-Error ("Could not find an application named '" + $app + "'. Try its exact name as shown in the Start menu, or a full path to its .exe.")
+  exit 1
+}
+`.trim()
+
 // SENSITIVE_PATH_RE + resolveSafePath live in ./fs/pathSafety so the filesystem
 // trust boundary can be unit-tested without importing this heavyweight module.
 // search_files also uses SENSITIVE_PATH_RE to withhold credential/token paths
@@ -309,29 +383,67 @@ function loadNut(): any {
 
 // ── Playwright browser automation ─────────────────────────────────────────────
 
-// Singleton headful Chromium browser and page.  null before the first
-// browser_navigate call, or after the browser is closed/crashed.
+// Singleton headful browser CONTEXT (persistent profile) and page. null before
+// the first browser_navigate call, or after the browser is closed/crashed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _pwBrowser: any = null
+let _pwContext: any = null
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _pwPage: any = null
 
 /**
- * Lazy-load Playwright (must be `npm install`-ed separately, along with
- * `npx playwright install chromium`) and return the shared Page, launching a
- * headful Chromium window if none is already open.  The same browser window
- * persists across tool calls so the user can watch OpenUI work.
+ * Browser channels tried, in order, when launching the automation browser.
+ * We prefer the user's REAL installed browser (Edge, then Chrome) so the window
+ * looks and behaves like their normal browser; `undefined` falls back to
+ * Playwright's bundled Chromium when neither is installed.
+ */
+const BROWSER_CHANNELS: (string | undefined)[] = IS_WIN
+  ? ['msedge', 'chrome', undefined]
+  : ['chrome', 'msedge', undefined]
+
+/**
+ * Lazy-load Playwright (must be `npm install`-ed separately) and return the
+ * shared Page, launching a headful window if none is already open.
+ *
+ * This drives the user's REAL installed browser (Edge/Chrome via a Playwright
+ * channel) inside a PERSISTENT profile stored under the app's userData dir — not
+ * a throwaway "guest" Chromium. That means cookies/logins survive across runs,
+ * so the user can sign in once and the automation window stays useful instead of
+ * being an empty test browser. The same window persists across tool calls so the
+ * user can watch OpenUI work.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getOrCreatePage(): Promise<any> {
   if (_pwPage) return _pwPage
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pw = requireFirst(['playwright']) as any
-  _pwBrowser = await pw.chromium.launch({ headless: false })
-  _pwPage = await _pwBrowser.newPage()
+
+  // A dedicated, persistent profile dir keeps logins/cookies between sessions.
+  // It is separate from the user's live browser profile (which is locked while
+  // their browser is open), so launching never conflicts with normal browsing.
+  const profileDir = joinPath(app.getPath('userData'), 'browser-profile')
+
+  let lastErr: unknown = null
+  for (const channel of BROWSER_CHANNELS) {
+    try {
+      _pwContext = await pw.chromium.launchPersistentContext(profileDir, {
+        headless: false,
+        channel,
+        viewport: null,
+        args: ['--start-maximized', '--no-first-run', '--no-default-browser-check']
+      })
+      break
+    } catch (err) {
+      lastErr = err // channel not installed — try the next one
+    }
+  }
+  if (!_pwContext) {
+    throw lastErr instanceof Error ? lastErr : new Error('Failed to launch a browser')
+  }
+
+  _pwPage = _pwContext.pages()[0] ?? (await _pwContext.newPage())
   // Reset state if the browser is closed by the user or crashes.
-  _pwBrowser.on('disconnected', () => {
-    _pwBrowser = null
+  _pwContext.on('close', () => {
+    _pwContext = null
     _pwPage = null
   })
   return _pwPage
@@ -339,16 +451,16 @@ async function getOrCreatePage(): Promise<any> {
 
 /**
  * Gracefully close the Playwright browser.  Should be called from the main
- * process before the Electron app quits so Chromium exits cleanly.
+ * process before the Electron app quits so the browser exits cleanly.
  */
 export async function closeBrowser(): Promise<void> {
-  if (_pwBrowser) {
+  if (_pwContext) {
     try {
-      await _pwBrowser.close()
+      await _pwContext.close()
     } catch {
       // ignore — process exit will kill the child anyway
     }
-    _pwBrowser = null
+    _pwContext = null
     _pwPage = null
   }
 }
@@ -391,9 +503,12 @@ async function open_app(args: Record<string, unknown>): Promise<ToolResult> {
         }
       }
       // The app name is passed out-of-band via the environment and read as a
-      // value ($env:OPENUI_APP); it never appears in the command text, so it
-      // cannot be parsed as PowerShell code.
-      await runPowerShell('Start-Process -FilePath $env:OPENUI_APP', { OPENUI_APP: appName })
+      // value ($env:OPENUI_APP); it never appears in the script text, so it
+      // cannot be parsed as PowerShell code. Resolve friendly names the way a
+      // user would find them in the Start menu — a bare `Start-Process
+      // -FilePath WhatsApp` fails for Store/UWP apps and anything not on PATH.
+      const out = await runPowerShellScript(WIN_OPEN_APP_SCRIPT, { OPENUI_APP: appName })
+      return { ok: true, output: `Launched ${appName}${out ? ` (${out})` : ''}.` }
     } else {
       // Linux best-effort: xdg-open treats the argument as a file/URI/app name.
       await execFileAsync('xdg-open', [appName])
@@ -1181,7 +1296,10 @@ export const toolSchemas: ToolSchema[] = [
     description:
       'Launch or focus an application by name. ' +
       'On macOS, use the display name (e.g. "Safari", "Calendar"). ' +
-      'On Windows, use the executable name (e.g. "notepad", "msedge", "code").',
+      'On Windows, use the name as it appears in the Start menu — friendly names ' +
+      'work for Store and desktop apps alike (e.g. "WhatsApp", "Spotify", "Notepad", ' +
+      '"Microsoft Edge"), as do bare executable names on PATH ("notepad", "msedge", "code") ' +
+      'and full paths to an .exe.',
     parameters: {
       type: 'object',
       properties: { appName: { type: 'string', description: 'The application name to open.' } },

@@ -175,16 +175,20 @@ ${allSchemas.map(renderSchema).join('\n')}
 Examples — map the request to a single tool-call message (emit ONLY the JSON):
 - "open the OpenUI folder" / "open Downloads" → {"tool": "open_app", "args": {"appName": "C:\\\\Users\\\\You\\\\Downloads"}}
 - "open Spotify" / "launch Chrome" → {"tool": "open_app", "args": {"appName": "Spotify"}}
+- "open Edge" / "open Microsoft Edge" / "open my browser" → {"tool": "open_app", "args": {"appName": "Microsoft Edge"}}
 - "find a file named report" / "search my files for budget" → {"tool": "search_files", "args": {"query": "report"}}
-- "check my email" / "open Gmail in the browser" → {"tool": "browser_navigate", "args": {"url": "https://mail.google.com/"}}
 - "schedule a meeting tomorrow at 3pm" → {"tool": "control_calendar", "args": {"action": "create", "eventDetails": {"title": "Meeting", "start": "2025-01-01T15:00:00"}}}
 
-Browser automation workflow — use this for ALL web-based tasks (booking flights, scraping websites, filling web forms, reading prices, searching the web). Playwright targets elements directly by CSS selector: faster, more reliable, and more precise than pixel-coordinate clicking:
-1. Call browser_navigate(url) — opens the URL in a visible Chromium window the user can watch.
+CRITICAL — opening an app or browser vs. automating a web page. These are DIFFERENT tools; do not confuse them:
+- When the user asks to OPEN or LAUNCH an application or a browser for THEM to use ("open Edge", "open Chrome", "open my browser", "open WhatsApp"), ALWAYS use open_app. This launches their REAL installed app with their normal profile, logins and extensions.
+- NEVER use browser_navigate just to "open a browser". browser_navigate opens a SEPARATE automation window (the user's installed browser driven by OpenUI in a dedicated profile) — use it ONLY when YOU need to read or interact with a web page to complete a task the user asked you to do.
+
+Browser automation workflow — use this ONLY when you must drive a web page yourself to complete a task (booking flights, scraping a site, filling web forms, reading prices, logging into a site on the user's behalf). It opens the user's installed browser (Edge/Chrome) in an OpenUI-controlled profile; it is NOT the way to simply hand the user their browser. Playwright targets elements directly by CSS selector: faster and more precise than pixel clicking:
+1. Call browser_navigate(url) — opens the URL in a visible browser window the user can watch.
 2. Call browser_extract_text() — reads the page body to understand the layout, find form labels, or scrape data.
 3. Call browser_click(selector) or browser_fill_input(selector, text) to interact with the page.
 4. Repeat steps 2–3 as needed until the task is done.
-Examples of tasks that MUST use this workflow: "book a flight", "check flight prices", "search Google", "scrape a website", "fill out a web form", "log into a website".
+Examples of tasks that MUST use this workflow: "book a flight for me", "check flight prices", "scrape a website", "fill out this web form", "log into this site and download my invoice".
 
 Screen navigation workflow — use this ONLY for native desktop apps with no web interface (e.g. VS Code panels, macOS system dialogs, Electron apps):
 1. Call read_screen() — it returns a description of every visible UI element with approximate X,Y coordinates.
