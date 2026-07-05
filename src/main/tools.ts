@@ -28,6 +28,7 @@ import { homedir } from 'node:os'
 import { SENSITIVE_PATH_RE, resolveSafePath } from './fs/pathSafety'
 import { app, desktopCapturer, clipboard, shell, BrowserWindow } from 'electron'
 import { checkAccessibility, type PermissionTarget } from './permissions'
+import { resolveApp, type InstalledApp } from './appResolver'
 import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
 import { callChatProxyText } from './edgeFunctions'
@@ -374,6 +375,128 @@ try {
 }
 `.trim()
 
+/**
+ * Static index script for the OpenUI app resolver: enumerate every installed app
+ * the user could open, as JSON. Two sources cover the vast majority of apps:
+ *   • Get-StartApps — Store/UWP apps + registered desktop apps, each with an
+ *     AppUserModelID we can launch via shell:AppsFolder.
+ *   • Start-menu .lnk shortcuts — path-launchable, and a safety net for anything
+ *     Get-StartApps misses.
+ * Takes NO user input, so nothing untrusted is ever spliced into the script.
+ */
+const WIN_LIST_APPS_SCRIPT = `
+$ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+$apps = New-Object System.Collections.ArrayList
+foreach ($a in (Get-StartApps)) {
+  if ($a.Name) {
+    [void]$apps.Add([pscustomobject]@{ name = [string]$a.Name; appId = [string]$a.AppID; path = ''; source = 'startapps' })
+  }
+}
+$roots = @(
+  (Join-Path $env:ProgramData 'Microsoft\\Windows\\Start Menu\\Programs'),
+  (Join-Path $env:AppData 'Microsoft\\Windows\\Start Menu\\Programs')
+)
+foreach ($root in $roots) {
+  if (Test-Path -LiteralPath $root) {
+    Get-ChildItem -LiteralPath $root -Recurse -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {
+      [void]$apps.Add([pscustomobject]@{ name = [string]$_.BaseName; appId = ''; path = [string]$_.FullName; source = 'shortcut' })
+    }
+  }
+}
+# @(...) guarantees a JSON array even when only one app is found.
+ConvertTo-Json -InputObject @($apps) -Compress -Depth 3
+`.trim()
+
+/** Launch a resolved app by its Start-menu AppID (Store/UWP + registered desktop). */
+const WIN_LAUNCH_APPID_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+Start-Process ('shell:AppsFolder\\' + $env:OPENUI_LAUNCH_TARGET)
+`.trim()
+
+/** Launch a resolved app by a full path to its .exe/.lnk. */
+const WIN_LAUNCH_PATH_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+Start-Process -FilePath $env:OPENUI_LAUNCH_TARGET
+`.trim()
+
+// In-memory index of installed apps. Enumerating shells out to PowerShell (a few
+// hundred ms), so a short TTL cache keeps rapid "open X / open Y" sequences snappy
+// without going stale as the user installs/uninstalls apps across a session.
+let _winAppCache: { at: number; apps: InstalledApp[] } | null = null
+const WIN_APP_CACHE_TTL_MS = 60_000
+
+/** Enumerate installed Windows apps (cached), for the resolver + list_apps. */
+async function enumerateWindowsApps(): Promise<InstalledApp[]> {
+  if (_winAppCache && Date.now() - _winAppCache.at < WIN_APP_CACHE_TTL_MS) {
+    return _winAppCache.apps
+  }
+  const out = await runPowerShellScript(WIN_LIST_APPS_SCRIPT)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(out || '[]')
+  } catch {
+    parsed = []
+  }
+  const arr = Array.isArray(parsed) ? parsed : parsed ? [parsed] : []
+  const apps: InstalledApp[] = []
+  for (const raw of arr) {
+    const a = raw as Record<string, unknown>
+    const name = typeof a?.name === 'string' ? a.name.trim() : ''
+    if (!name) continue
+    apps.push({
+      name,
+      appId: typeof a.appId === 'string' && a.appId ? a.appId : undefined,
+      path: typeof a.path === 'string' && a.path ? a.path : undefined,
+      source: a.source === 'shortcut' ? 'shortcut' : 'startapps'
+    })
+  }
+  _winAppCache = { at: Date.now(), apps }
+  return apps
+}
+
+/** Launch a resolved app by AppID (preferred) or path. Throws on failure. */
+async function launchWindowsApp(match: InstalledApp): Promise<void> {
+  if (match.appId) {
+    await runPowerShellScript(WIN_LAUNCH_APPID_SCRIPT, { OPENUI_LAUNCH_TARGET: match.appId })
+  } else if (match.path) {
+    await runPowerShellScript(WIN_LAUNCH_PATH_SCRIPT, { OPENUI_LAUNCH_TARGET: match.path })
+  } else {
+    throw new Error(`No launch target for "${match.name}".`)
+  }
+}
+
+/**
+ * List the apps installed on this machine (read-only). Lets the model discover
+ * the exact name to pass to open_app when the user's phrasing is ambiguous, and
+ * lets the user ask "what can you open?". Windows-only for now — it reads the
+ * OpenUI app index; macOS/Linux return a clear "not supported yet" message.
+ */
+async function list_apps(args: Record<string, unknown>): Promise<ToolResult> {
+  if (!IS_WIN) {
+    return {
+      ok: false,
+      error: 'list_apps is currently supported on Windows only. On macOS, use open_app with the app’s display name.'
+    }
+  }
+  try {
+    const apps = await enumerateWindowsApps()
+    const filter = typeof args.filter === 'string' ? args.filter.toLowerCase().trim() : ''
+    const names = [...new Set(apps.map((a) => a.name))].sort((a, b) => a.localeCompare(b))
+    const shown = filter ? names.filter((n) => n.toLowerCase().includes(filter)) : names
+    if (shown.length === 0) {
+      return { ok: true, output: filter ? `No installed apps match "${filter}".` : 'No installed apps found.' }
+    }
+    const header = filter
+      ? `Installed apps matching "${filter}" (${shown.length}):`
+      : `Installed apps (${shown.length}):`
+    return { ok: true, output: `${header}\n${shown.join('\n')}` }
+  } catch (err) {
+    const stderr = (err as { stderr?: string }).stderr?.trim()
+    return { ok: false, error: `list_apps failed: ${stderr || (err instanceof Error ? err.message : String(err))}` }
+  }
+}
+
 // SENSITIVE_PATH_RE + resolveSafePath live in ./fs/pathSafety so the filesystem
 // trust boundary can be unit-tested without importing this heavyweight module.
 // search_files also uses SENSITIVE_PATH_RE to withhold credential/token paths
@@ -506,11 +629,19 @@ async function open_app(args: Record<string, unknown>): Promise<ToolResult> {
           error: `open_app refuses to launch "${appName}": shells, scripting hosts and registry tools are blocked for safety.`
         }
       }
-      // The app name is passed out-of-band via the environment and read as a
-      // value ($env:OPENUI_APP); it never appears in the script text, so it
-      // cannot be parsed as PowerShell code. Resolve friendly names the way a
-      // user would find them in the Start menu — a bare `Start-Process
-      // -FilePath WhatsApp` fails for Store/UWP apps and anything not on PATH.
+      // OpenUI resolver: index the installed apps and fuzzy-match the user's
+      // phrasing ("VS Code" → "Visual Studio Code", "chrome" → "Google Chrome").
+      // The user text is matched in JS against system-supplied names — it is never
+      // spliced into a script — and the winner is launched by its AppID/path.
+      const match = resolveApp(appName, await enumerateWindowsApps())
+      if (match) {
+        await launchWindowsApp(match)
+        const via = match.name.toLowerCase() === appName.toLowerCase() ? '' : ` (matched "${appName}")`
+        return { ok: true, output: `Launched ${match.name}${via}.` }
+      }
+      // Fallback resolver script: handles literal full paths and bare PATH names
+      // (notepad, msedge, code) that aren't in the Start-menu index. The app name
+      // is passed out-of-band via $env:OPENUI_APP, never spliced into the script.
       const out = await runPowerShellScript(WIN_OPEN_APP_SCRIPT, { OPENUI_APP: appName })
       return { ok: true, output: `Launched ${appName}${out ? ` (${out})` : ''}.` }
     } else {
@@ -1441,6 +1572,24 @@ export const toolSchemas: ToolSchema[] = [
     }
   },
   {
+    name: 'list_apps',
+    description:
+      'List the applications installed on this computer (Windows). Use this to ' +
+      'discover the exact name of an app before calling open_app when the user is ' +
+      'vague, or to answer "what apps can you open?". Optionally pass a "filter" ' +
+      'substring to narrow the list (e.g. filter "studio" to find "Visual Studio Code").',
+    parameters: {
+      type: 'object',
+      properties: {
+        filter: {
+          type: 'string',
+          description: 'Optional case-insensitive substring to filter app names by.'
+        }
+      },
+      required: []
+    }
+  },
+  {
     name: 'search_files',
     description:
       'Search the local filesystem for files matching a query and return their paths. ' +
@@ -1733,6 +1882,7 @@ async function run_workflow(args: Record<string, unknown>): Promise<ToolResult> 
 const registry: Record<string, Executor> = {
   open_app,
   open_whatsapp_chat,
+  list_apps,
   search_files,
   control_calendar,
   move_mouse,
@@ -1870,6 +2020,8 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
       return `Open ${String(args.appName ?? args.name ?? 'app')}`
     case 'open_whatsapp_chat':
       return `Open WhatsApp chat with ${String(args.contact ?? args.name ?? args.query ?? '')}`
+    case 'list_apps':
+      return args.filter ? `List installed apps matching "${String(args.filter)}"` : 'List installed apps'
     case 'search_files':
       return `Search files for "${String(args.query ?? '')}"`
     case 'control_calendar': {
