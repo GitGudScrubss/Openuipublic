@@ -95,6 +95,7 @@ export const STATE_CHANGING_TOOLS = new Set<string>([
   'left_click',
   'type_text',
   'open_app',
+  'open_whatsapp_chat',
   'move_mouse',
   'browser_navigate',
   'browser_click',
@@ -365,7 +366,10 @@ try {
   Write-Output 'path'
   exit 0
 } catch {
-  Write-Error ("Could not find an application named '" + $app + "'. Try its exact name as shown in the Start menu, or a full path to its .exe.")
+  # Write straight to the stderr stream: Write-Error is swallowed here because
+  # $ErrorActionPreference = 'SilentlyContinue', which would leave the caller with
+  # only Node's opaque "Command failed: <base64>" message and no real reason.
+  [Console]::Error.WriteLine("Could not find an application named '" + $app + "'. Try its exact name as shown in the Start menu (e.g. 'Visual Studio Code', not 'VS Code'), or a full path to its .exe.")
   exit 1
 }
 `.trim()
@@ -515,10 +519,120 @@ async function open_app(args: Record<string, unknown>): Promise<ToolResult> {
     }
     return { ok: true, output: `Activated ${appName}.` }
   } catch (err) {
+    // execFile rejects with message "Command failed: <full command line>", which
+    // for -EncodedCommand is a giant base64 blob — useless to the model/user and
+    // context-polluting. Prefer the process's real stderr (the friendly resolver
+    // message) and fall back to the raw message only when stderr is empty.
+    const stderr = (err as { stderr?: string }).stderr?.trim()
+    const detail = stderr || (err instanceof Error ? err.message : String(err))
     return {
       ok: false,
-      error: `Tool execution failed: ${err instanceof Error ? err.message : String(err)}`
+      error: `open_app could not launch "${appName}": ${detail}`
     }
+  }
+}
+
+/** Sleep helper for scripted UI flows (WhatsApp chat opening, etc.). */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Press then release a key combo via nut-js (e.g. Ctrl+F). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function tapKeys(nut: any, ...keys: any[]): Promise<void> {
+  await nut.keyboard.pressKey(...keys)
+  await nut.keyboard.releaseKey(...keys)
+}
+
+/**
+ * Open a specific WhatsApp conversation by contact/group name.
+ *
+ * Why a dedicated tool instead of letting the model chain open_app → read_screen
+ * → click: on the local/free tier read_screen only returns OCR *text*, never the
+ * X,Y coordinates that move_mouse/left_click need, so a visual "find the search
+ * box and click it" flow is impossible there. Modelling the whole flow as one
+ * deterministic, keyboard-driven tool sidesteps that — WhatsApp Desktop's own
+ * shortcuts (Ctrl+F to focus chat search, type, Enter to open the top hit) work
+ * without any coordinates. This is UI automation, so timings are necessarily
+ * best-effort; the delays are overridable via OPENUI_WA_* env vars for tuning.
+ */
+async function open_whatsapp_chat(args: Record<string, unknown>): Promise<ToolResult> {
+  const raw =
+    typeof args.contact === 'string'
+      ? args.contact
+      : typeof args.name === 'string'
+        ? args.name
+        : typeof args.query === 'string'
+          ? args.query
+          : ''
+  // Strip control chars/newlines: a stray newline would submit the search early.
+  // eslint-disable-next-line no-control-regex
+  const contact = raw.replace(/[\x00-\x1f\x7f]/g, '').trim()
+  if (!contact) {
+    return { ok: false, error: 'open_whatsapp_chat requires a "contact" name (the chat to open).' }
+  }
+  if (contact.length > 128) {
+    return { ok: false, error: 'open_whatsapp_chat "contact" is too long (max 128 characters).' }
+  }
+  if (!checkAccessibility()) {
+    return {
+      ok: false,
+      error:
+        'Tool execution failed: Missing OS permissions — Accessibility access is required for keyboard control. ' +
+        'Please grant access in System Settings → Privacy & Security → Accessibility.',
+      permissionDenied: 'accessibility'
+    }
+  }
+
+  const launchMs = Number(process.env.OPENUI_WA_LAUNCH_MS ?? 3000)
+  const searchMs = Number(process.env.OPENUI_WA_SEARCH_MS ?? 900)
+  const filterMs = Number(process.env.OPENUI_WA_FILTER_MS ?? 2000)
+
+  try {
+    // 1) Launch or focus WhatsApp. Reuse the Start-menu resolver on Windows so the
+    //    Store/UWP app is found the same way `open_app WhatsApp` finds it.
+    if (IS_MAC) {
+      await runAppleScript('tell application "WhatsApp" to activate')
+    } else if (IS_WIN) {
+      await runPowerShellScript(WIN_OPEN_APP_SCRIPT, { OPENUI_APP: 'WhatsApp' })
+    } else {
+      await execFileAsync('xdg-open', ['whatsapp://'])
+    }
+
+    const nut = loadNut()
+    // Give the window time to appear + gain focus (cold start is slow; a warm app
+    // just refocuses). Keyboard input goes to whatever is focused, so this wait is
+    // what makes the difference between typing into WhatsApp vs. into thin air.
+    await delay(launchMs)
+
+    // 2) Focus the chat-search box. Escape first clears any open menu/compose
+    //    state so Ctrl+F reliably lands on the top-level "Search" field.
+    await tapKeys(nut, nut.Key.Escape)
+    await delay(200)
+    await tapKeys(nut, nut.Key.LeftControl, nut.Key.F)
+    await delay(searchMs)
+
+    // 3) Clear any residual query, then type the contact name.
+    await tapKeys(nut, nut.Key.LeftControl, nut.Key.A)
+    await tapKeys(nut, nut.Key.Delete)
+    await nut.keyboard.type(contact)
+    await delay(filterMs) // let the results list filter down
+
+    // 4) Open the top match: select the first result, then Enter.
+    await tapKeys(nut, nut.Key.Down)
+    await delay(200)
+    await tapKeys(nut, nut.Key.Enter)
+
+    return {
+      ok: true,
+      output:
+        `Opened WhatsApp and searched for "${contact}", then opened the top matching chat. ` +
+        `If the wrong chat opened or none did, tell me the contact's exact name as it appears in WhatsApp.`
+    }
+  } catch (err) {
+    const stderr = (err as { stderr?: string }).stderr?.trim()
+    const detail = stderr || (err instanceof Error ? err.message : String(err))
+    return { ok: false, error: `open_whatsapp_chat failed for "${contact}": ${detail}` }
   }
 }
 
@@ -1307,6 +1421,26 @@ export const toolSchemas: ToolSchema[] = [
     }
   },
   {
+    name: 'open_whatsapp_chat',
+    description:
+      'Open a specific WhatsApp conversation by contact or group name. Use this ' +
+      'INSTEAD of open_app + read_screen/click whenever the user wants to open, ' +
+      'go to, or message a particular WhatsApp chat (e.g. "open my WhatsApp chat ' +
+      'with Ashu", "message Mom on WhatsApp"). It launches WhatsApp, searches for ' +
+      'the name, and opens the top matching chat via the keyboard — no screen ' +
+      'coordinates needed. Do NOT invent a "search_contact" tool; this is the one to use.',
+    parameters: {
+      type: 'object',
+      properties: {
+        contact: {
+          type: 'string',
+          description: 'The contact or group name of the chat to open, as it appears in WhatsApp.'
+        }
+      },
+      required: ['contact']
+    }
+  },
+  {
     name: 'search_files',
     description:
       'Search the local filesystem for files matching a query and return their paths. ' +
@@ -1598,6 +1732,7 @@ async function run_workflow(args: Record<string, unknown>): Promise<ToolResult> 
 
 const registry: Record<string, Executor> = {
   open_app,
+  open_whatsapp_chat,
   search_files,
   control_calendar,
   move_mouse,
@@ -1733,6 +1868,8 @@ export function describeToolCall(name: string, args: Record<string, unknown>): s
   switch (name) {
     case 'open_app':
       return `Open ${String(args.appName ?? args.name ?? 'app')}`
+    case 'open_whatsapp_chat':
+      return `Open WhatsApp chat with ${String(args.contact ?? args.name ?? args.query ?? '')}`
     case 'search_files':
       return `Search files for "${String(args.query ?? '')}"`
     case 'control_calendar': {
