@@ -429,12 +429,33 @@ async function callOllama(
   onDelta: (delta: string) => void
 ): Promise<string> {
   const ollama = new Ollama({ host: process.env.OLLAMA_HOST ?? 'http://127.0.0.1:11434' })
+  // Llama 3 8B is trained for 8192 tokens. Ollama defaults num_ctx to 4096,
+  // which silently truncates our system prompt + tool instructions (~6.5k tokens)
+  // and makes the model reply with nonsense / skip tool calls. Request the full
+  // trained window (overridable via OLLAMA_NUM_CTX for lower-RAM machines).
+  const numCtx = Number(process.env.OLLAMA_NUM_CTX ?? 8192)
+
+  // Pre-flight guard: Ollama truncates the *middle* of the prompt (where our tool
+  // instructions live) without failing, so a heads-up here is the only warning we
+  // get before the model starts replying with nonsense / skipping automation.
+  // ~4 chars/token is a rough but conservative estimate for Llama 3's BPE tokenizer.
+  const promptChars = systemPrompt.length + messages.reduce((n, m) => n + m.content.length, 0)
+  const estTokens = Math.ceil(promptChars / 4)
+  if (estTokens > numCtx) {
+    const msg = `[agent] ⚠ Prompt ~${estTokens} tokens exceeds num_ctx ${numCtx}. Ollama will truncate the middle of the prompt (tool instructions), so replies may be incoherent or skip automation. Raise OLLAMA_NUM_CTX (max 8192 for llama3:8b) or start a new conversation.`
+    console.warn(msg)
+    emit(_win, 'openui:chat:warning', { message: msg, estTokens, numCtx })
+  } else if (estTokens > numCtx * 0.9) {
+    console.warn(`[agent] Prompt ~${estTokens} tokens is nearing num_ctx ${numCtx}; conversation is close to the truncation limit.`)
+  }
+
   const stream = await ollama.chat({
     model: process.env.OLLAMA_MODEL ?? 'llama3:8b',
     messages: [
       { role: 'system', content: systemPrompt },
       ...messages.map((m) => ({ role: m.role, content: m.content }))
     ],
+    options: { num_ctx: numCtx },
     stream: true
   })
   let full = ''
