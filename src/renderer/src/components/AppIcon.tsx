@@ -2,7 +2,7 @@ import type { AppKind } from '../lib/appKind'
 
 /**
  * A monochrome line glyph for each app kind the agent can drive. Used by the
- * ActivityPanel tile and the TaskBoard cards. `currentColor` is inherited from
+ * ActivityPanel tile and the Timeline rows. `currentColor` is inherited from
  * the CSS class on the wrapping element, so theming lives in index.css.
  */
 export default function AppIcon({ kind, size = 18 }: { kind: AppKind; size?: number }): JSX.Element {

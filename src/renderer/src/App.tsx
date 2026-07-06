@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import AssistantPopup from './components/AssistantPopup'
-import TaskBoard from './components/TaskBoard'
+import ConnectedRail from './components/ConnectedRail'
 import ActivityPanel from './components/ActivityPanel'
 import PermissionModal from './components/PermissionModal'
 import HitlModal from './components/HitlModal'
@@ -11,7 +11,7 @@ import WorkflowsUI from './components/WorkflowsUI'
 import { useAssistantAnimations } from './hooks/useAssistantAnimations'
 import { useOnboarding } from './hooks/useOnboarding'
 import { AuthProvider } from './context/AuthContext'
-import { TaskActivityProvider } from './context/TaskActivityContext'
+import { TaskActivityProvider, useTaskActivity } from './context/TaskActivityContext'
 import type { PermissionTarget, HitlRequestPayload, PlanRequestPayload } from './env'
 
 /** Brief splash shown while the persisted onboarding flag is read. */
@@ -116,6 +116,7 @@ function AppShell(): JSX.Element {
   const [hitlRequest, setHitlRequest] = useState<HitlRequestPayload | null>(null)
   const [planRequest, setPlanRequest] = useState<PlanRequestPayload | null>(null)
 
+  const { taskViewActive } = useTaskActivity()
   const { isComplete, isLoading, completeOnboarding } = useOnboarding()
   // The first message typed in onboarding, replayed once the chat mounts.
   const [initialMessage, setInitialMessage] = useState<string | null>(null)
@@ -185,7 +186,7 @@ function AppShell(): JSX.Element {
   return (
     <div ref={overlayRef} className="openui-overlay">
       <TitleBar />
-      <div className="ou-content">
+      <div className={`ou-content${taskViewActive ? ' ou-taskview' : ''}`}>
       {isLoading ? (
         <LoadingScreen />
       ) : !isComplete ? (
@@ -198,7 +199,7 @@ function AppShell(): JSX.Element {
             onPermissionNeeded={setPermissionNeeded}
             initialMessage={initialMessage}
           />
-          <TaskBoard />
+          {taskViewActive && <ConnectedRail />}
           <ActivityPanel />
           {/* Workflows toggle button — bottom-left corner */}
           <button

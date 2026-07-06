@@ -96,6 +96,25 @@ export function appKindForTool(tool: string): AppKind {
   return 'app'
 }
 
+/**
+ * Resolve a free-form app *hint* (e.g. a sub-agent's "netflix" / "amazon" /
+ * "linkedin") to an app kind for its timeline row icon. Messaging/design apps
+ * map to their own kinds; most connected web services are driven in the browser.
+ */
+export function appKindForName(name: string | undefined): AppKind {
+  if (!name) return 'app'
+  const n = name.toLowerCase()
+  if (n.includes('whatsapp')) return 'whatsapp'
+  if (n.includes('slack') || n.includes('telegram') || n.includes('discord') || n.includes('message'))
+    return 'messaging'
+  if (n.includes('figma')) return 'figma'
+  if (n.includes('github')) return 'github'
+  if (n.includes('calendar')) return 'calendar'
+  if (n.includes('file') || n.includes('folder')) return 'files'
+  // netflix, amazon, linkedin, gmail, spotify… → browser-driven web services.
+  return 'browser'
+}
+
 /** Full metadata (label + status phrase) for a tool. */
 export function appMetaForTool(tool: string): AppMeta {
   const kind = appKindForTool(tool)

@@ -19,7 +19,7 @@ import { codingToolSchemas, executeCodingTool, describeCodingToolCall } from './
 import { getNextTask, recordTaskOutcome, type TaskSource, type AgentTask } from './tasks'
 import type { Tier, ToolResult, ToolSchema } from './tools'
 
-/** Status the renderer reflects in the TaskBoard "Background Agent" banner. */
+/** Status the renderer reflects in the left rail's "Background Agent" banner. */
 export interface AutonomousStatus {
   active: boolean
   state: 'disabled' | 'monitoring' | 'working' | 'paused'
