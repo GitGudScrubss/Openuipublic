@@ -15,6 +15,7 @@ import ConversationList from './ConversationList'
 import PlusMenu, { type AttachedFile } from './PlusMenu'
 import ConnectAppsModal from './ConnectAppsModal'
 import ThinkingStatus from './ThinkingStatus'
+import Timeline from './Timeline'
 import { useTaskActivity } from '../context/TaskActivityContext'
 
 type HistoryMsg = { role: string; content: string | null; created_at: number }
@@ -781,6 +782,10 @@ export default function AssistantPopup({
               </div>
             )
           })}
+
+          {/* Center tool-call timeline (#1/#2) — every tool call + any real
+              parallel sub-agent group for the current turn, inline in the thread. */}
+          <Timeline />
 
           {/* Was-this-helpful rating — feeds the local self-improvement loop. */}
           {voiceState === 'done' && <FeedbackButtons given={feedbackGiven} onRate={rate} />}

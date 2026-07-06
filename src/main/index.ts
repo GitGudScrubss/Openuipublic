@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, session, shell } from 'electron'
+import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, session, shell, desktopCapturer } from 'electron'
 import { join } from 'path'
 import { registerAgentIPC, registerConversationIPC } from './agent'
 import { startPromptRefiner, stopPromptRefiner } from './promptRefiner'
@@ -657,6 +657,26 @@ ipcMain.handle('openui:mcp:connect', async (_event, config: unknown) => {
     return { ok: false, error: validated.error }
   }
   return connectMcpServer(validated.config)
+})
+
+// Live-preview thumbnail for the activity panel. Read-only: captures the primary
+// display at a SMALL, main-controlled size and returns a data URL. The renderer
+// supplies no parameters (dimensions are hardcoded here), so there is no
+// injection surface — this is the same desktopCapturer path read_screen() uses,
+// narrowed to a cheap thumbnail the UI can poll while a screen/app tool runs.
+const THUMB_WIDTH = 480
+const THUMB_HEIGHT = 270
+ipcMain.handle('openui:screen:thumbnail', async () => {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: THUMB_WIDTH, height: THUMB_HEIGHT }
+    })
+    if (!sources.length) return { ok: false as const, error: 'No screen source available.' }
+    return { ok: true as const, dataUrl: sources[0].thumbnail.toDataURL() }
+  } catch (err) {
+    return { ok: false as const, error: err instanceof Error ? err.message : String(err) }
+  }
 })
 
 app.on('before-quit', () => {

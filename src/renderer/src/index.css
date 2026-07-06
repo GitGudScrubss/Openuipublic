@@ -2176,11 +2176,345 @@ body {
 .ou-hist-dot.done { background: #34c759; }
 .ou-hist-dot.failed { background: #ff5a4d; }
 
-/* On narrow windows the docked panels would cover the centered chat, so hide
-   them below the width where the app already switches to its compact layout. */
+/* ═══════════════════════════════════════════════════════════════════════════
+   TASK VIEW — three-zone layout (left rail | center timeline | right previews)
+   The compact centered composer is the idle state; when a task starts, the app
+   expands into these three zones (App.tsx toggles .ou-taskview on .ou-content).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Center chat clears the docked side columns while a task runs. */
+.ou-content.ou-taskview .ou-workspace {
+  margin-left: 244px;
+  margin-right: 340px;
+  transition: margin 0.28s cubic-bezier(0.34, 1.1, 0.64, 1);
+}
+
+/* ── Left rail ─────────────────────────────────────────────────────────────*/
+.ou-rail {
+  position: fixed;
+  left: 0;
+  top: 40px; /* below the custom title bar */
+  bottom: 0;
+  width: 244px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 12px;
+  background: var(--ou-bg);
+  border-right: 1px solid var(--ou-border);
+  z-index: 48;
+  animation: ou-rail-in 0.32s cubic-bezier(0.34, 1.1, 0.64, 1) both;
+}
+@keyframes ou-rail-in {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: none; }
+}
+.ou-rail-section { display: flex; flex-direction: column; gap: 6px; }
+.ou-rail-tasks { flex: 1; min-height: 0; }
+.ou-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px;
+}
+.ou-rail-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ou-text-faint);
+}
+.ou-rail-count { font-size: 10.5px; color: var(--ou-text-faint); }
+.ou-rail-add {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1px solid var(--ou-border);
+  background: var(--ou-surface);
+  color: var(--ou-text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ou-rail-add:hover { background: var(--ou-surface-2); color: var(--ou-text); }
+.ou-rail-conns { display: flex; flex-direction: column; gap: 2px; }
+.ou-rail-conn { display: flex; align-items: center; gap: 9px; padding: 6px 7px; border-radius: 8px; }
+.ou-rail-conn:hover { background: var(--ou-surface); }
+.ou-rail-conn-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ou-surface);
+  border: 1px solid var(--ou-border);
+  color: var(--ou-text-dim);
+  flex-shrink: 0;
+}
+.ou-rail-conn-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ou-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ou-rail-conn-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--ou-text-faint); }
+.ou-rail-conn-dot.connected { background: #34c759; box-shadow: 0 0 0 3px rgba(52, 199, 89, 0.14); }
+.ou-rail-conn-dot.connecting { background: #f5a623; animation: ou-pulse 1s infinite; }
+.ou-rail-conn-dot.error { background: #ff5a4d; }
+.ou-rail-tasklist { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.ou-rail-empty { padding: 8px 6px; font-size: 11px; color: var(--ou-text-faint); }
+.ou-rail-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.ou-rail-task:hover { background: var(--ou-surface); }
+.ou-rail-task.focused { background: var(--ou-surface); border-color: var(--ou-border-strong); }
+.ou-rail-task-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--ou-text-faint); }
+.ou-rail-task-dot.in_progress { background: var(--ou-accent); animation: ou-pulse 1.1s infinite; }
+.ou-rail-task-dot.done { background: #34c759; }
+.ou-rail-task-dot.failed { background: #ff5a4d; }
+.ou-rail-task-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ou-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ou-rail-task-status { font-size: 9.5px; color: var(--ou-text-faint); flex-shrink: 0; }
+.ou-rail-task-status.in_progress { color: var(--ou-accent); }
+.ou-rail-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ou-border);
+}
+
+/* ── Center timeline (inline in the transcript) ─────────────────────────────*/
+.ou-timeline { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 8px; }
+.ou-tl-row { display: flex; align-items: flex-start; gap: 10px; padding: 7px 9px; border-radius: 9px; }
+.ou-tl-row:hover { background: var(--ou-surface); }
+.ou-tl-check {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+.ou-tl-check.pending { border: 1.5px solid var(--ou-border-strong); }
+.ou-tl-check.working { color: #fff; background: var(--ou-accent); }
+.ou-tl-check.done { color: #fff; background: #34c759; }
+.ou-tl-check.error { color: #fff; background: #ff5a4d; }
+.ou-tl-spinner {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  animation: ou-spin 0.7s linear infinite;
+}
+@keyframes ou-spin { to { transform: rotate(360deg); } }
+.ou-tl-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ou-surface);
+  border: 1px solid var(--ou-border);
+  color: var(--ou-text-dim);
+}
+.ou-tl-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ou-tl-label { font-size: 12.5px; color: var(--ou-text); }
+.ou-tl-detail { font-size: 11px; color: var(--ou-text-faint); }
+.ou-tl-detail.error { color: #ff8a7d; }
+
+/* Parallel sub-agent group */
+.ou-tl-parallel {
+  margin: 4px 0 4px 6px;
+  border-left: 2px solid var(--ou-border-strong);
+  border-radius: 0 10px 10px 0;
+  background: linear-gradient(90deg, rgba(47, 123, 255, 0.05), transparent 62%);
+}
+.ou-tl-parallel.working { border-left-color: var(--ou-accent); }
+.ou-tl-parallel.error { border-left-color: #ff5a4d; }
+.ou-tl-parallel-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.ou-tl-parallel-glyph { color: var(--ou-accent); flex-shrink: 0; }
+.ou-tl-parallel-label { flex: 1; text-align: left; font-size: 12px; font-weight: 600; color: var(--ou-text); }
+.ou-tl-chevron { color: var(--ou-text-faint); transition: transform 0.18s ease; }
+.ou-tl-chevron.open { transform: rotate(180deg); }
+.ou-tl-parallel-subs { display: flex; flex-direction: column; gap: 2px; padding: 0 8px 8px 10px; }
+.ou-tl-sub { display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 8px; }
+.ou-tl-sub:hover { background: var(--ou-surface); }
+.ou-tl-sub-branch { display: none; }
+.ou-tl-sub-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ou-surface);
+  border: 1px solid var(--ou-border);
+  color: var(--ou-text-dim);
+}
+.ou-tl-sub-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ou-tl-sub-title { font-size: 12px; color: var(--ou-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ou-tl-sub-summary { font-size: 10.5px; color: var(--ou-text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Honest model tag chip */
+.ou-model-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: 20px;
+  background: var(--ou-surface-2);
+  border: 1px solid var(--ou-border);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ou-text-dim);
+  white-space: nowrap;
+}
+.ou-model-tag-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ou-accent); }
+.ou-model-tag.sm { padding: 2px 6px; font-size: 9.5px; }
+
+/* ── Right column: live-preview cards ───────────────────────────────────────*/
+.ou-activity {
+  position: fixed;
+  right: 0;
+  top: 40px;
+  bottom: 0;
+  width: 340px;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--ou-bg);
+  border: none;
+  border-left: 1px solid var(--ou-border);
+  border-radius: 0;
+  box-shadow: none;
+  z-index: 48;
+  overflow-y: auto;
+  animation: ou-rail-in 0.32s cubic-bezier(0.34, 1.1, 0.64, 1) both;
+}
+.ou-preview-card {
+  margin: 10px 12px 0;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--ou-border);
+  background: var(--ou-surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  flex-shrink: 0;
+  animation: openui-rise 0.3s cubic-bezier(0.34, 1.2, 0.64, 1) both;
+}
+.ou-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--ou-border);
+  background: var(--ou-surface-2);
+}
+.ou-preview-appicon {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ou-bg);
+  border: 1px solid var(--ou-border);
+  color: var(--ou-text-dim);
+  flex-shrink: 0;
+}
+.ou-preview-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ou-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ou-preview-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #ff5a4d;
+  flex-shrink: 0;
+}
+.ou-preview-body {
+  position: relative;
+  height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: radial-gradient(120% 120% at 50% 0%, rgba(47, 123, 255, 0.14), transparent 60%);
+}
+.ou-preview-card.sub .ou-preview-body { height: 96px; }
+.ou-preview-shot { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ou-preview-foot { padding: 8px 10px; font-size: 11px; color: var(--ou-text-dim); border-top: 1px solid var(--ou-border); }
+
+/* Per-kind icon tints for the new wrappers (mirrors the existing tint block). */
+.ou-tl-icon.browser, .ou-tl-sub-icon.browser, .ou-preview-appicon.browser, .ou-rail-conn-icon.browser { color: #4a9eff; }
+.ou-tl-icon.github, .ou-tl-sub-icon.github, .ou-preview-appicon.github, .ou-rail-conn-icon.github { color: #e6e6e6; }
+.ou-tl-icon.figma, .ou-tl-sub-icon.figma, .ou-preview-appicon.figma, .ou-rail-conn-icon.figma { color: #ff7262; }
+.ou-tl-icon.files, .ou-tl-sub-icon.files, .ou-preview-appicon.files, .ou-rail-conn-icon.files { color: #f5b74a; }
+.ou-tl-icon.clipboard, .ou-tl-sub-icon.clipboard, .ou-preview-appicon.clipboard, .ou-rail-conn-icon.clipboard { color: #a0a0a8; }
+.ou-tl-icon.calendar, .ou-tl-sub-icon.calendar, .ou-preview-appicon.calendar, .ou-rail-conn-icon.calendar { color: #ff6b6b; }
+.ou-tl-icon.screen, .ou-tl-sub-icon.screen, .ou-preview-appicon.screen, .ou-rail-conn-icon.screen { color: #5ac8fa; }
+.ou-tl-icon.whatsapp, .ou-tl-sub-icon.whatsapp, .ou-preview-appicon.whatsapp, .ou-rail-conn-icon.whatsapp { color: #25d366; }
+.ou-tl-icon.messaging, .ou-tl-sub-icon.messaging, .ou-preview-appicon.messaging, .ou-rail-conn-icon.messaging { color: #7c9cff; }
+
+/* On narrow windows the docked columns would cover the centered chat, so hide
+   them and let the chat return to full width (the compact/idle layout). */
 @media (max-width: 1024px) {
-  #task-popup,
+  .ou-rail,
   .ou-activity {
     display: none;
+  }
+  .ou-content.ou-taskview .ou-workspace {
+    margin-left: 0;
+    margin-right: 0;
   }
 }

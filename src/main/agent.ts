@@ -1,6 +1,7 @@
 import { Ollama } from 'ollama'
 import { BrowserWindow, ipcMain } from 'electron'
 import { toolSchemas, executeTool, describeToolCall, DESTRUCTIVE_TOOLS, type ToolSchema, type ToolResult, type PendingApprovalResult, type Tier } from './tools'
+import { SPAWN_SUBAGENTS_TOOL, runParallelSubagents, parseSubTaskSpecs } from './subagents'
 import { generatePlan, looksLikeTask, type Plan } from './planner'
 import { getMcpToolSchemas, callMcpTool } from './mcp-client'
 import { database } from './database'
@@ -197,6 +198,10 @@ Screen navigation workflow — use this ONLY for native desktop apps with no web
 4. Call left_click() to activate it.
 
 For anything that does not require a system action, just reply in plain text.
+
+Parallel sub-agents — when a request splits into INDEPENDENT sub-tasks that do not depend on each other's results (e.g. "check whether I used Netflix, Amazon Prime, and LinkedIn last month"), run them at the same time by emitting ONE call:
+{"tool": "spawn_subagents", "args": {"tasks": [{"title": "Check Netflix usage", "instruction": "Open netflix.com viewing activity and report whether it was used last month.", "app": "netflix"}, {"title": "Check Amazon Prime usage", "instruction": "Open Amazon order/watch history and report Prime usage last month.", "app": "amazon"}]}}
+Each task runs concurrently in its own sub-agent on its own model. Use this ONLY for genuinely independent work (max 4 tasks) — never for sequential steps that depend on one another. When they finish you receive one combined TOOL RESULT summarising every sub-agent; use it to reply to the user.
 
 GitHub PR review workflow — use this when the user asks to "Review my PRs" or "review pull requests":
 1. Call list_open_prs(repo) — use the repo the user mentions, or the value of GITHUB_REPO env var if they say "my PRs".
@@ -578,6 +583,10 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
   const autonomy = getAutonomyLevel()
 
   const model = modelForTier(effectiveTier)
+  // Tell the renderer the model the backend is ACTUALLY using this turn, so the
+  // UI's model tag reflects reality (client-side tier ≠ effective model after
+  // entitlement clamping). Read-only main→renderer push.
+  emit(win, 'openui:chat:model', { model, tier: effectiveTier })
   if (requestedTier !== effectiveTier) {
     trackEvent(Events.MODEL_DOWNGRADE, {
       tier,
@@ -715,6 +724,26 @@ export async function handleChat(win: BrowserWindow, userMessage: string, tier: 
         history.push({
           role: 'user',
           content: `TOOL RESULT [${COMPLETE_STEP_TOOL}] success: step ${stepId || '(unknown)'} checked off. Continue with the next step.`
+        })
+        continue
+      }
+
+      // spawn_subagents fans the turn out into REAL concurrent sub-agents, each
+      // on its own model from the live pool. It is orchestrated here (never via
+      // executeTool) and feeds a merged summary back so the parent can continue.
+      if (toolCall.tool === SPAWN_SUBAGENTS_TOOL) {
+        const specs = parseSubTaskSpecs(toolCall.args)
+        if (specs.length === 0) {
+          history.push({
+            role: 'user',
+            content: `TOOL RESULT [${SPAWN_SUBAGENTS_TOOL}] error: no valid tasks. Provide {"tasks":[{"title":"…","instruction":"…"}]}.`
+          })
+          continue
+        }
+        const summary = await runParallelSubagents(win, specs, effectiveTier)
+        history.push({
+          role: 'user',
+          content: `TOOL RESULT [${SPAWN_SUBAGENTS_TOOL}] success: ${summary}`
         })
         continue
       }

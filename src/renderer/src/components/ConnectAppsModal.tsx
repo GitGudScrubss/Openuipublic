@@ -107,6 +107,37 @@ const CATALOG: SourceDef[] = [
 /** Module-level status store so re-opening the modal reflects live connections. */
 const statusStore = new Map<string, { state: ConnectionState; message?: string }>()
 
+// ── Shared connection state (read by the left rail) ──────────────────────────
+export interface ConnectableApp {
+  id: string
+  name: string
+  kind: AppKind
+  state: ConnectionState
+  message?: string
+}
+
+const connListeners = new Set<() => void>()
+
+/** Subscribe to connection-status changes; returns an unsubscribe fn. */
+export function subscribeConnections(fn: () => void): () => void {
+  connListeners.add(fn)
+  return () => connListeners.delete(fn)
+}
+
+/** Snapshot every connectable source with its current live state. */
+export function getConnections(): ConnectableApp[] {
+  return CATALOG.map((s) => {
+    const st = statusStore.get(s.id) ?? { state: 'disconnected' as ConnectionState }
+    return { id: s.id, name: s.name, kind: s.kind, state: st.state, message: st.message }
+  })
+}
+
+/** Update a source's status and notify the rail + any open modal rows. */
+function setConnStatus(id: string, next: { state: ConnectionState; message?: string }): void {
+  statusStore.set(id, next)
+  for (const l of connListeners) l()
+}
+
 function buildConfig(src: SourceDef, tagValue: string, secretValue: string, urlValue: string): McpConnectConfig {
   if (src.transport === 'sse') {
     return { name: src.id, type: 'sse', url: urlValue.trim() }
@@ -145,23 +176,23 @@ function SourceRow({ src }: { src: SourceDef }): JSX.Element {
     const err = validate(config)
     if (err) {
       const next = { state: 'error' as ConnectionState, message: err }
-      statusStore.set(src.id, next)
+      setConnStatus(src.id, next)
       setStatus(next)
       return
     }
     const connecting = { state: 'connecting' as ConnectionState }
-    statusStore.set(src.id, connecting)
+    setConnStatus(src.id, connecting)
     setStatus(connecting)
     try {
       const res = await window.openui.mcpConnect(config)
       const next: { state: ConnectionState; message?: string } = res.ok
         ? { state: 'connected', message: `Connected · ${res.toolCount ?? 0} tool${res.toolCount === 1 ? '' : 's'}` }
         : { state: 'error', message: res.error ?? 'Failed to connect' }
-      statusStore.set(src.id, next)
+      setConnStatus(src.id, next)
       setStatus(next)
     } catch (e) {
       const next = { state: 'error' as ConnectionState, message: e instanceof Error ? e.message : 'Failed to connect' }
-      statusStore.set(src.id, next)
+      setConnStatus(src.id, next)
       setStatus(next)
     }
   }
