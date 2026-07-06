@@ -528,13 +528,24 @@ body {
 /* ─────────────────────────────────────────
    TASK CHECKLIST POPUP
 ───────────────────────────────────────── */
+/* Task board — docked top-right. Position/chrome that used to come from
+   .mac-window now lives here so the board no longer needs that class. GSAP still
+   fades it in via the #task-popup selector in useAssistantAnimations. */
 #task-popup {
-  bottom: 50px;
-  right: 32px;
-  width: 278px;
+  position: fixed;
+  top: 54px;
+  right: 20px;
+  width: 300px;
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
   background: var(--ou-bg);
   border: 1px solid var(--ou-border);
+  border-radius: 12px;
+  overflow: hidden;
   color: var(--ou-text);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(0, 0, 0, 0.4);
+  opacity: 0; /* revealed by the GSAP entrance timeline */
   z-index: 50;
 }
 
@@ -1302,4 +1313,874 @@ body {
   padding: 5px 11px;
   cursor: pointer;
   font-family: -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   UI/UX OVERHAUL — center-stage composer, "+" menu, connect-apps panel,
+   thinking status, docked task board, and live activity panel.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+/* ── Hero: centered greeting + composer (Claude/ChatGPT home layout) ─────── */
+.ou-chatbody.hero {
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.ou-chatbody.hero .mic-stage {
+  flex: 0 0 auto;
+  padding: 6px 0 14px;
+}
+.ou-hero-greeting {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ou-text);
+  text-align: center;
+  margin-bottom: 2px;
+}
+
+/* ── Composer wrapper (hosts the input strip + attachments) ──────────────── */
+.ou-composer {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  flex-shrink: 0;
+}
+.ou-composer.hero {
+  max-width: 640px;
+}
+.ou-composer.docked {
+  margin-top: 10px;
+}
+.ou-composer .input-strip {
+  max-width: none;
+  margin: 0;
+  width: 100%;
+}
+.ou-composer.hero .input-strip {
+  padding: 14px 16px;
+  border-radius: 16px;
+}
+.ou-composer-input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--ou-text);
+  font-size: 13px;
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+}
+.ou-composer-input::placeholder {
+  color: var(--ou-text-faint);
+}
+.ou-composer-input:disabled {
+  opacity: 0.4;
+}
+.ou-composer.hero .ou-composer-input {
+  font-size: 15px;
+}
+
+/* Send button — appears once there's text to send. */
+.ou-send-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: none;
+  background: var(--ou-accent);
+  color: #fff;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: filter 0.15s, transform 0.12s;
+}
+.ou-send-btn:hover {
+  filter: brightness(1.12);
+}
+.ou-send-btn:active {
+  transform: scale(0.94);
+}
+
+/* Attachment chips above the composer. */
+.ou-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.ou-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--ou-surface);
+  border: 1px solid var(--ou-border);
+  font-size: 11px;
+  color: var(--ou-text-dim);
+}
+.ou-attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ou-attach-x {
+  border: none;
+  background: none;
+  color: var(--ou-text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+}
+.ou-attach-x:hover {
+  color: var(--ou-text);
+}
+
+/* ── "+" menu ────────────────────────────────────────────────────────────── */
+.ou-plus {
+  position: relative;
+  flex-shrink: 0;
+}
+.ou-plus-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--ou-border);
+  background: var(--ou-surface);
+  color: var(--ou-text-dim);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.ou-plus-btn:hover,
+.ou-plus-btn.open {
+  background: var(--ou-surface-2);
+  color: var(--ou-text);
+  border-color: var(--ou-border-strong);
+}
+.ou-plus-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.ou-plus-fileinput {
+  display: none;
+}
+.ou-plus-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 200;
+  width: 244px;
+  padding: 6px;
+  background: var(--ou-surface);
+  border: 1px solid var(--ou-border-strong);
+  border-radius: 12px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+  animation: openui-rise 0.16s ease-out both;
+}
+.ou-plus-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--ou-text-dim);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+.ou-plus-item:hover {
+  background: var(--ou-surface-2);
+  color: var(--ou-text);
+}
+.ou-plus-item svg {
+  flex-shrink: 0;
+}
+.ou-plus-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ou-plus-item-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ou-text);
+}
+.ou-plus-item-sub {
+  font-size: 10.5px;
+  color: var(--ou-text-faint);
+}
+
+/* ── Thinking status (dynamic line above the streaming reply) ────────────── */
+.ou-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--ou-border);
+  background: var(--ou-ai-bubble);
+  align-self: flex-start;
+}
+.ou-thinking-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.ou-thinking-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ou-accent);
+  animation: ou-think-bounce 1.2s ease-in-out infinite;
+}
+.ou-thinking-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.ou-thinking-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes ou-think-bounce {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+.ou-thinking-text {
+  font-size: 12.5px;
+  color: var(--ou-text-dim);
+  animation: openui-fade 0.3s ease both;
+}
+@keyframes openui-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ── Shared modal scrim + app-kind icon tints ────────────────────────────── */
+.ou-modal-scrim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9998;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.ou-conn-icon,
+.ou-card-appicon,
+.ou-hist-icon,
+.ou-activity-glyph {
+  color: var(--ou-text-dim);
+}
+.ou-conn-icon.browser, .ou-card-appicon.browser, .ou-hist-icon.browser, .ou-activity-glyph.browser { color: #4a9eff; }
+.ou-conn-icon.github, .ou-card-appicon.github, .ou-hist-icon.github, .ou-activity-glyph.github { color: #e6e6e6; }
+.ou-conn-icon.figma, .ou-card-appicon.figma, .ou-hist-icon.figma, .ou-activity-glyph.figma { color: #ff7262; }
+.ou-conn-icon.files, .ou-card-appicon.files, .ou-hist-icon.files, .ou-activity-glyph.files { color: #f5b74a; }
+.ou-conn-icon.clipboard, .ou-card-appicon.clipboard, .ou-hist-icon.clipboard, .ou-activity-glyph.clipboard { color: #a0a0a8; }
+.ou-conn-icon.calendar, .ou-card-appicon.calendar, .ou-hist-icon.calendar, .ou-activity-glyph.calendar { color: #ff6b6b; }
+.ou-conn-icon.screen, .ou-card-appicon.screen, .ou-hist-icon.screen, .ou-activity-glyph.screen { color: #5ac8fa; }
+.ou-conn-icon.whatsapp, .ou-card-appicon.whatsapp, .ou-hist-icon.whatsapp, .ou-activity-glyph.whatsapp { color: #25d366; }
+.ou-conn-icon.messaging, .ou-card-appicon.messaging, .ou-hist-icon.messaging, .ou-activity-glyph.messaging { color: #7c9cff; }
+
+/* ── Connect-apps (MCP) panel ────────────────────────────────────────────── */
+.ou-conn-panel {
+  width: 92%;
+  max-width: 480px;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--ou-surface);
+  border: 1px solid var(--ou-border-strong);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+.ou-conn-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--ou-border);
+}
+.ou-conn-h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ou-text);
+}
+.ou-conn-sub {
+  font-size: 12px;
+  color: var(--ou-text-dim);
+  line-height: 1.5;
+  margin-top: 4px;
+  max-width: 380px;
+}
+.ou-conn-close {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--ou-text-faint);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.ou-conn-close:hover {
+  color: var(--ou-text);
+}
+.ou-conn-list {
+  padding: 8px;
+}
+.ou-conn-row {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  transition: background 0.12s, border-color 0.12s;
+}
+.ou-conn-row:hover {
+  background: var(--ou-bg);
+  border-color: var(--ou-border);
+}
+.ou-conn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--ou-bg);
+  border: 1px solid var(--ou-border);
+  flex-shrink: 0;
+}
+.ou-conn-main {
+  flex: 1;
+  min-width: 0;
+}
+.ou-conn-titlerow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ou-conn-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ou-text);
+}
+.ou-conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--ou-text-faint);
+}
+.ou-conn-status.connected { color: #34c759; }
+.ou-conn-status.error { color: #ff5a4d; }
+.ou-conn-status.connecting { color: var(--ou-accent); }
+.ou-conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ou-text-faint);
+}
+.ou-conn-dot.connected { background: #34c759; }
+.ou-conn-dot.error { background: #ff5a4d; }
+.ou-conn-dot.connecting { background: var(--ou-accent); animation: ou-pulse 1s ease-in-out infinite; }
+@keyframes ou-pulse {
+  50% { opacity: 0.35; }
+}
+.ou-conn-blurb {
+  font-size: 11.5px;
+  color: var(--ou-text-dim);
+  line-height: 1.45;
+  margin: 4px 0 8px;
+}
+.ou-conn-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ou-conn-input {
+  flex: 1;
+  min-width: 120px;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--ou-border);
+  background: var(--ou-bg);
+  color: var(--ou-text);
+  font-size: 12px;
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+  outline: none;
+}
+.ou-conn-input:focus {
+  border-color: var(--ou-border-strong);
+}
+.ou-conn-btn {
+  flex-shrink: 0;
+  padding: 7px 16px;
+  border-radius: 8px;
+  border: none;
+  background: var(--ou-accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.ou-conn-btn:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+.ou-conn-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* ── Assign-a-task modal ─────────────────────────────────────────────────── */
+.ou-assign-panel {
+  width: 92%;
+  max-width: 440px;
+  padding: 18px 20px 20px;
+  background: var(--ou-surface);
+  border: 1px solid var(--ou-border-strong);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+}
+.ou-assign-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ou-assign-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ou-text);
+}
+.ou-assign-sub {
+  font-size: 12px;
+  color: var(--ou-text-dim);
+  line-height: 1.5;
+  margin: 6px 0 12px;
+}
+.ou-assign-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 92px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ou-border);
+  background: var(--ou-bg);
+  color: var(--ou-text);
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+  outline: none;
+}
+.ou-assign-input:focus {
+  border-color: var(--ou-border-strong);
+}
+.ou-assign-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+.ou-assign-cancel,
+.ou-assign-go {
+  padding: 8px 16px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+}
+.ou-assign-cancel {
+  border: 1px solid var(--ou-border);
+  background: none;
+  color: var(--ou-text-dim);
+}
+.ou-assign-cancel:hover {
+  background: var(--ou-surface-2);
+  color: var(--ou-text);
+}
+.ou-assign-go {
+  border: none;
+  background: var(--ou-accent);
+  color: #fff;
+}
+.ou-assign-go:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+.ou-assign-go:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Task board (docked top-right; internal layout only — chrome is on #task-popup) ── */
+.ou-taskboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--ou-border);
+  flex-shrink: 0;
+}
+.ou-taskboard-heading {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ou-text);
+}
+.ou-taskboard-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ou-text-faint);
+}
+.ou-taskboard-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ou-taskboard-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 18px 12px;
+  text-align: center;
+}
+.ou-taskboard-empty-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ou-text-dim);
+}
+.ou-taskboard-empty-sub {
+  font-size: 11px;
+  color: var(--ou-text-faint);
+  line-height: 1.4;
+}
+.ou-taskboard-footer-text {
+  font-size: 10px;
+  color: var(--ou-text-faint);
+  font-family: -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* Task cards */
+.ou-card {
+  border: 1px solid var(--ou-border);
+  border-radius: 10px;
+  background: var(--ou-surface);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+.ou-card.in_progress {
+  border-color: rgba(47, 123, 255, 0.4);
+}
+.ou-card.failed {
+  border-color: rgba(255, 90, 77, 0.35);
+}
+.ou-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 11px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+.ou-card-head:hover {
+  background: var(--ou-surface-2);
+}
+.ou-card-appicon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: var(--ou-bg);
+  border: 1px solid var(--ou-border);
+  flex-shrink: 0;
+}
+.ou-card-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ou-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ou-card-badge {
+  flex-shrink: 0;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 3px 7px;
+  border-radius: 99px;
+}
+.ou-card-badge.in_progress {
+  color: var(--ou-accent);
+  background: var(--ou-accent-soft);
+}
+.ou-card-badge.done {
+  color: #34c759;
+  background: rgba(52, 199, 89, 0.14);
+}
+.ou-card-badge.failed {
+  color: #ff5a4d;
+  background: rgba(255, 90, 77, 0.14);
+}
+.ou-card-chevron {
+  flex-shrink: 0;
+  color: var(--ou-text-faint);
+  transition: transform 0.18s ease;
+}
+.ou-card-chevron.open {
+  transform: rotate(180deg);
+}
+.ou-card-meta {
+  padding: 0 11px 8px 43px;
+  font-size: 10.5px;
+  color: var(--ou-text-faint);
+}
+.ou-card-steps {
+  border-top: 1px solid var(--ou-border);
+  padding: 4px 0;
+  animation: openui-fade 0.2s ease both;
+}
+.ou-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 12px;
+}
+.ou-step-body {
+  min-width: 0;
+}
+.ou-step .task-label.error {
+  color: #ff6b6b;
+}
+
+/* ── Live activity panel (docked bottom-right) ───────────────────────────── */
+.ou-activity {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 300px;
+  max-height: 46vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--ou-bg);
+  border: 1px solid var(--ou-border);
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(0, 0, 0, 0.4);
+  z-index: 49;
+  overflow: hidden;
+  animation: openui-rise 0.3s cubic-bezier(0.34, 1.2, 0.64, 1) both;
+}
+.ou-activity-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--ou-border);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ou-text-faint);
+  flex-shrink: 0;
+}
+.ou-activity-tile {
+  margin: 12px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--ou-border);
+  background: var(--ou-surface);
+  flex-shrink: 0;
+}
+.ou-activity-screen {
+  position: relative;
+  height: 104px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(120% 120% at 50% 0%, rgba(47, 123, 255, 0.16), transparent 60%),
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.02) 0px, rgba(255, 255, 255, 0.02) 1px, transparent 1px, transparent 4px);
+  overflow: hidden;
+}
+.ou-activity-scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 40px;
+  background: linear-gradient(180deg, transparent, rgba(90, 200, 250, 0.18), transparent);
+  animation: ou-scan 2.4s linear infinite;
+}
+@keyframes ou-scan {
+  from { transform: translateY(-40px); }
+  to { transform: translateY(104px); }
+}
+.ou-activity-glyph {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 62px;
+  height: 62px;
+  border-radius: 14px;
+  background: var(--ou-bg);
+  border: 1px solid var(--ou-border-strong);
+}
+.ou-activity-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+}
+.ou-activity-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #ff5a4d;
+}
+.ou-activity-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ff5a4d;
+  animation: ou-pulse 1s ease-in-out infinite;
+}
+.ou-activity-app {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ou-text);
+}
+.ou-activity-phrase {
+  font-size: 11.5px;
+  color: var(--ou-text-dim);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.ou-activity-idle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px dashed var(--ou-border);
+  font-size: 11.5px;
+  color: var(--ou-text-faint);
+  flex-shrink: 0;
+}
+.ou-activity-idle-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ou-text-faint);
+}
+.ou-activity-history-label {
+  padding: 4px 14px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ou-text-faint);
+  flex-shrink: 0;
+}
+.ou-activity-history {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ou-activity-history-empty {
+  padding: 10px 8px;
+  font-size: 11px;
+  color: var(--ou-text-faint);
+}
+.ou-hist-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border-radius: 9px;
+  transition: background 0.12s;
+}
+.ou-hist-row:hover {
+  background: var(--ou-surface);
+}
+.ou-hist-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--ou-surface);
+  border: 1px solid var(--ou-border);
+  flex-shrink: 0;
+}
+.ou-hist-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ou-hist-title {
+  font-size: 12px;
+  color: var(--ou-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ou-hist-sub {
+  font-size: 10px;
+  color: var(--ou-text-faint);
+}
+.ou-hist-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--ou-text-faint);
+}
+.ou-hist-dot.done { background: #34c759; }
+.ou-hist-dot.failed { background: #ff5a4d; }
+
+/* On narrow windows the docked panels would cover the centered chat, so hide
+   them below the width where the app already switches to its compact layout. */
+@media (max-width: 1024px) {
+  #task-popup,
+  .ou-activity {
+    display: none;
+  }
 }

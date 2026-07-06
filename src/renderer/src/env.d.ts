@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 
+import type { AppKind } from './lib/appKind'
+
 /** Which OS permission needs to be granted before the tool can proceed. */
 export type PermissionTarget = 'accessibility' | 'microphone'
 
@@ -167,6 +169,46 @@ export interface Workflow {
 export type WorkflowResult = { ok: boolean; error?: string }
 export type WorkflowImportResult = { ok: boolean; workflow?: Workflow; error?: string }
 
+// ── MCP connectors ─────────────────────────────────────────────────────────────
+
+/** Config the renderer sends to `mcpConnect`; every field is re-validated in main. */
+export interface McpConnectConfig {
+  name: string
+  type: 'stdio' | 'sse'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+}
+
+/** Result of an `mcpConnect` call. */
+export interface McpConnectResult {
+  ok: boolean
+  error?: string
+  toolCount?: number
+}
+
+// ── Task board / activity (renderer-only, derived from IPC task+tool events) ───
+
+/** Live connection state of a connectable source in the Connect-apps panel. */
+export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error'
+
+/**
+ * One user request grouped as a card in the task board. Steps are the individual
+ * tool calls / plan rows the agent ran, keyed by their task-update id.
+ */
+export interface TaskCard {
+  id: string
+  title: string
+  status: 'in_progress' | 'done' | 'failed'
+  kind: 'chat' | 'assigned'
+  steps: TaskUpdatePayload[]
+  /** App the agent is currently driving (browser, whatsapp…), for the activity tile. */
+  currentApp?: AppKind
+  startedAt: number
+  endedAt?: number
+}
+
 export interface OpenUIApi {
   // Window
   hide: () => void
@@ -179,6 +221,9 @@ export interface OpenUIApi {
   closeWindow: () => void
   isMaximized: () => Promise<boolean>
   onMaximizeChange: (cb: (maximized: boolean) => void) => () => void
+
+  // MCP connectors — bridge to the validated 'openui:mcp:connect' handler in main.
+  mcpConnect: (config: McpConnectConfig) => Promise<McpConnectResult>
 
   // Chat
   chat: (message: string, tier: Tier) => Promise<void>

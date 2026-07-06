@@ -15,6 +15,17 @@ type RecorderAction =
 
 type RecorderMacro = { name: string; actions: RecorderAction[]; createdAt: string }
 
+/** Config the renderer sends to connect an MCP server. Re-validated in main. */
+type McpConnectConfig = {
+  name: string
+  type: 'stdio' | 'sse'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+}
+type McpConnectResult = { ok: boolean; error?: string; toolCount?: number }
+
 /** Signed-in user profile pushed/returned by the main auth layer. */
 type AuthUser = {
   id: string
@@ -107,6 +118,13 @@ const api = {
 
   chat: (message: string, tier: Tier): Promise<void> =>
     ipcRenderer.invoke('openui:chat', { message, tier }),
+
+  // ── MCP connectors ──────────────────────────────────────────────────────────
+  // Bridge to the (already validated) 'openui:mcp:connect' handler in main.
+  // The main process re-validates every field (validateMcpConfig + stdio command
+  // allowlist), so nothing here is trusted — this only makes the handler reachable.
+  mcpConnect: (config: McpConnectConfig): Promise<McpConnectResult> =>
+    ipcRenderer.invoke('openui:mcp:connect', config),
 
   clearHistory: (): void => ipcRenderer.send('openui:clear-history'),
 
