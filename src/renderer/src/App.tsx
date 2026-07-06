@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import AssistantPopup from './components/AssistantPopup'
-import TaskListPopup from './components/TaskListPopup'
+import TaskBoard from './components/TaskBoard'
+import ActivityPanel from './components/ActivityPanel'
 import PermissionModal from './components/PermissionModal'
 import HitlModal from './components/HitlModal'
 import PlanApprovalModal from './components/PlanApprovalModal'
@@ -10,6 +11,7 @@ import WorkflowsUI from './components/WorkflowsUI'
 import { useAssistantAnimations } from './hooks/useAssistantAnimations'
 import { useOnboarding } from './hooks/useOnboarding'
 import { AuthProvider } from './context/AuthContext'
+import { TaskActivityProvider } from './context/TaskActivityContext'
 import type { PermissionTarget, HitlRequestPayload, PlanRequestPayload } from './env'
 
 /** Brief splash shown while the persisted onboarding flag is read. */
@@ -196,7 +198,8 @@ function AppShell(): JSX.Element {
             onPermissionNeeded={setPermissionNeeded}
             initialMessage={initialMessage}
           />
-          <TaskListPopup />
+          <TaskBoard />
+          <ActivityPanel />
           {/* Workflows toggle button — bottom-left corner */}
           <button
             onClick={() => setShowWorkflows(true)}
@@ -269,7 +272,9 @@ function AppShell(): JSX.Element {
 export default function App(): JSX.Element {
   return (
     <AuthProvider>
-      <AppShell />
+      <TaskActivityProvider>
+        <AppShell />
+      </TaskActivityProvider>
     </AuthProvider>
   )
 }
