@@ -39,6 +39,31 @@ import { installCrashReporter } from './telemetry/crashReporter'
 // setup below can throw — so startup crashes are logged and reported too.
 installCrashReporter()
 
+// GUI-launched macOS .app bundles inherit a minimal PATH (typically just
+// /usr/bin:/bin:/usr/sbin:/sbin) that omits Homebrew/nvm/Volta install
+// locations, so subprocess helpers (e.g. `ollama`, `open_app`'s tools) can
+// silently fail to resolve binaries that work fine from a Terminal shell.
+// Append a fixed list of known-safe install locations — do NOT shell out to
+// the user's login shell to read its real PATH (e.g. `$SHELL -lic 'echo
+// $PATH'`), since that would execute arbitrary shell-profile content as a
+// side effect of merely launching the app.
+if (process.platform === 'darwin') {
+  const KNOWN_MAC_BIN_DIRS = [
+    '/opt/homebrew/bin', // Homebrew on Apple Silicon
+    '/opt/homebrew/sbin',
+    '/usr/local/bin', // Homebrew on Intel
+    '/usr/local/sbin',
+    `${process.env.HOME}/.nvm/current/bin`,
+    `${process.env.HOME}/.volta/bin`
+  ]
+  const currentPath = process.env.PATH ?? ''
+  const existingDirs = new Set(currentPath.split(':').filter(Boolean))
+  const additions = KNOWN_MAC_BIN_DIRS.filter((dir) => !existingDirs.has(dir))
+  if (additions.length) {
+    process.env.PATH = [currentPath, ...additions].filter(Boolean).join(':')
+  }
+}
+
 let tray: Tray | null = null
 let win: BrowserWindow | null = null
 
@@ -56,7 +81,7 @@ let launchRevealedAt = 0
 
 const isDev = !app.isPackaged
 
-const PERMISSION_TARGETS: readonly PermissionTarget[] = ['accessibility', 'microphone']
+const PERMISSION_TARGETS: readonly PermissionTarget[] = ['accessibility', 'microphone', 'screenRecording']
 
 /**
  * Content-Security-Policy applied to every renderer response.
@@ -318,6 +343,13 @@ function createTray(): void {
   // Left click toggles the popup; right click opens the context menu.
   tray.on('click', () => toggleWindow())
   tray.on('right-click', () => tray?.popUpContextMenu(contextMenu))
+
+  // macOS: the same menu, right-click/Ctrl-click on the Dock icon — Dock
+  // right-clicks are handled natively by the OS once a menu is set, no event
+  // wiring needed the way the Tray above requires.
+  if (process.platform === 'darwin') {
+    app.dock?.setMenu(contextMenu)
+  }
 }
 
 // Claim the single-instance lock and register the openui:// protocol BEFORE the
@@ -591,6 +623,7 @@ app.whenReady().then(async () => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    else showWindow()
   })
 })
 

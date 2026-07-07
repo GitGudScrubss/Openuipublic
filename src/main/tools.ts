@@ -10,7 +10,7 @@
  *
  * PLATFORM: open_app, search_files, and control_calendar select a backend at
  * call time via process.platform:
- *   macOS   → AppleScript via node-osascript (lazy-loaded)
+ *   macOS   → AppleScript via the `osascript` binary (execFile, no shell)
  *   Windows → PowerShell (Start-Process / Get-ChildItem / Outlook COM)
  *   Linux   → best-effort xdg-open / find (limited functionality)
  * Mouse/keyboard tools use @nut-tree/nut-js which is cross-platform.
@@ -27,7 +27,7 @@ import { resolve as resolvePath, join as joinPath, dirname, sep } from 'node:pat
 import { homedir } from 'node:os'
 import { SENSITIVE_PATH_RE, resolveSafePath } from './fs/pathSafety'
 import { app, desktopCapturer, clipboard, shell, BrowserWindow } from 'electron'
-import { checkAccessibility, type PermissionTarget } from './permissions'
+import { checkAccessibility, checkScreenRecording, type PermissionTarget } from './permissions'
 import { resolveApp, type InstalledApp } from './appResolver'
 import { githubToolSchemas, githubRegistry } from './github'
 import { figmaToolSchemas, figmaRegistry } from './figma'
@@ -153,7 +153,7 @@ const TIER_ORDER: Tier[] = ['free', 'pro', 'enterprise']
 
 type Executor = (args: Record<string, unknown>, context?: ExecutorContext) => Promise<ToolResult>
 
-// ── macOS helpers (AppleScript via node-osascript) ────────────────────────────
+// ── macOS helpers (AppleScript via osascript) ──────────────────────────────
 
 /** require() the first module name that resolves; throws if none do. */
 function requireFirst(names: string[]): unknown {
@@ -173,30 +173,37 @@ function requireFirst(names: string[]): unknown {
  * Escape a JS string for safe interpolation into an AppleScript double-quoted
  * string literal.
  *
- * SECURITY: node-osascript's variable-injection helper serialises strings as
- * '"' + value + '"' with NO escaping, so any '"' in a value breaks out of the
- * literal and the rest of the value is executed as AppleScript. We therefore
- * build the full script ourselves with every untrusted value passed through
- * this escaper and never use the package's variable injection.
+ * SECURITY: the script text is interpolated directly (there is no separate
+ * variable-injection channel to osascript), so any unescaped '"' in a value
+ * would break out of the literal and the rest of the value would execute as
+ * AppleScript. Every untrusted value MUST be passed through this escaper
+ * before being embedded in a script string.
  */
 function asStringLiteral(value: string): string {
   return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
 }
 
+// Hard wall-clock bound on every AppleScript child, matching PS_TIMEOUT_MS/
+// PS_MAX_BUFFER below — a hung `tell application` call (e.g. a modal dialog)
+// is killed rather than left to hang the tool call indefinitely.
+const AS_TIMEOUT_MS = 15_000
+const AS_MAX_BUFFER = 1024 * 1024
+
 /**
- * Run a fully-formed AppleScript via node-osascript. All dynamic values must
- * already be embedded as escaped literals via asStringLiteral() — the broken
- * built-in serialiser is never exercised.
+ * Run a fully-formed AppleScript via the `osascript` binary directly (no
+ * shell — the script is passed as a single argv element to execFile). All
+ * dynamic values must already be embedded as escaped literals via
+ * asStringLiteral(). Bounded by AS_TIMEOUT_MS/AS_MAX_BUFFER so a hung script
+ * (and its child process) cannot hang a tool call forever — a Promise.race
+ * alone would not achieve this, since it only stops waiting without killing
+ * the underlying process.
  */
-function runAppleScript(script: string): Promise<string> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const osascript = requireFirst(['node-osascript']) as any
-  return new Promise<string>((resolve, reject) => {
-    osascript.execute(script, (err: unknown, result: unknown): void => {
-      if (err) reject(err instanceof Error ? err : new Error(String(err)))
-      else resolve(Array.isArray(result) ? result.join(', ') : String(result ?? ''))
-    })
+async function runAppleScript(script: string): Promise<string> {
+  const { stdout } = await execFileAsync('osascript', ['-e', script], {
+    timeout: AS_TIMEOUT_MS,
+    maxBuffer: AS_MAX_BUFFER
   })
+  return stdout.trim()
 }
 
 // ── Windows helpers (PowerShell) ──────────────────────────────────────────────
@@ -296,6 +303,16 @@ const WIN_BLOCKED_APPS = new Set([
   'cmd', 'powershell', 'powershell_ise', 'pwsh', 'bash', 'sh', 'zsh', 'wsl',
   'wscript', 'cscript', 'mshta', 'rundll32', 'regsvr32',
   'regedit', 'regedt32', 'reg', 'bcdedit', 'wmic'
+])
+
+/**
+ * macOS counterpart to WIN_BLOCKED_APPS: shells, terminals and scripting
+ * hosts that turn open_app + type_text into arbitrary code execution.
+ * Matched case-insensitively, with any ".app" stripped.
+ */
+const MAC_BLOCKED_APPS = new Set([
+  'terminal', 'iterm', 'iterm2', 'script editor', 'applescript editor',
+  'automator', 'console', 'shortcuts'
 ])
 
 /**
@@ -455,6 +472,45 @@ async function enumerateWindowsApps(): Promise<InstalledApp[]> {
   return apps
 }
 
+// Standard locations for .app bundles. readdir (not `mdfind`) so this works
+// even when Spotlight is disabled or still indexing.
+const MAC_APP_DIRS = [
+  '/Applications',
+  '/Applications/Utilities',
+  '/System/Applications',
+  '/System/Applications/Utilities',
+  joinPath(homedir(), 'Applications')
+]
+
+let _macAppCache: { at: number; apps: InstalledApp[] } | null = null
+const MAC_APP_CACHE_TTL_MS = 60_000
+
+/** Enumerate installed macOS apps (cached), for the resolver + list_apps. */
+async function enumerateMacApps(): Promise<InstalledApp[]> {
+  if (_macAppCache && Date.now() - _macAppCache.at < MAC_APP_CACHE_TTL_MS) {
+    return _macAppCache.apps
+  }
+  const apps: InstalledApp[] = []
+  for (const dir of MAC_APP_DIRS) {
+    let entries: string[]
+    try {
+      entries = await readdir(dir)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.app')) continue
+      apps.push({
+        name: entry.slice(0, -'.app'.length),
+        path: joinPath(dir, entry),
+        source: 'app-bundle'
+      })
+    }
+  }
+  _macAppCache = { at: Date.now(), apps }
+  return apps
+}
+
 /** Launch a resolved app by AppID (preferred) or path. Throws on failure. */
 async function launchWindowsApp(match: InstalledApp): Promise<void> {
   if (match.appId) {
@@ -469,18 +525,19 @@ async function launchWindowsApp(match: InstalledApp): Promise<void> {
 /**
  * List the apps installed on this machine (read-only). Lets the model discover
  * the exact name to pass to open_app when the user's phrasing is ambiguous, and
- * lets the user ask "what can you open?". Windows-only for now — it reads the
- * OpenUI app index; macOS/Linux return a clear "not supported yet" message.
+ * lets the user ask "what can you open?". Supported on Windows (Start-menu +
+ * Get-StartApps index) and macOS (.app bundles in the standard Applications
+ * directories); Linux returns a clear "not supported yet" message.
  */
 async function list_apps(args: Record<string, unknown>): Promise<ToolResult> {
-  if (!IS_WIN) {
+  if (!IS_WIN && !IS_MAC) {
     return {
       ok: false,
-      error: 'list_apps is currently supported on Windows only. On macOS, use open_app with the app’s display name.'
+      error: 'list_apps is currently supported on Windows and macOS only.'
     }
   }
   try {
-    const apps = await enumerateWindowsApps()
+    const apps = IS_MAC ? await enumerateMacApps() : await enumerateWindowsApps()
     const filter = typeof args.filter === 'string' ? args.filter.toLowerCase().trim() : ''
     const names = [...new Set(apps.map((a) => a.name))].sort((a, b) => a.localeCompare(b))
     const shown = filter ? names.filter((n) => n.toLowerCase().includes(filter)) : names
@@ -620,6 +677,39 @@ async function open_app(args: Record<string, unknown>): Promise<ToolResult> {
   }
   try {
     if (IS_MAC) {
+      const isMacBlocked = (name: string): boolean =>
+        MAC_BLOCKED_APPS.has(name.toLowerCase().replace(/\.app$/, '').trim())
+      if (isMacBlocked(appName)) {
+        return {
+          ok: false,
+          error: `open_app refuses to launch "${appName}": shells, terminals and scripting hosts are blocked for safety.`
+        }
+      }
+      // OpenUI resolver: index installed .app bundles and fuzzy-match the
+      // user's phrasing ("vs code" → "Visual Studio Code"), mirroring the
+      // Windows path below. Matched in JS against system-supplied names —
+      // never spliced into a script — and the winner launched via `open -a`
+      // (no shell). Re-checked against the blocklist in case an alias ever
+      // maps a benign phrase to a blocked app name.
+      const match = resolveApp(appName, await enumerateMacApps())
+      if (match) {
+        if (isMacBlocked(match.name)) {
+          return {
+            ok: false,
+            error: `open_app refuses to launch "${match.name}": shells, terminals and scripting hosts are blocked for safety.`
+          }
+        }
+        if (match.path) {
+          await execFileAsync('open', ['-a', match.path])
+        } else {
+          await runAppleScript(`tell application ${asStringLiteral(match.name)} to activate`)
+        }
+        const via = match.name.toLowerCase() === appName.toLowerCase() ? '' : ` (matched "${appName}")`
+        return { ok: true, output: `Launched ${match.name}${via}.` }
+      }
+      // Fallback: not in the standard bundle directories (e.g. a system
+      // service, or an app addressed by its AppleScript application name
+      // rather than its bundle display name) — let AppleScript resolve it.
       await runAppleScript(`tell application ${asStringLiteral(appName)} to activate`)
     } else if (IS_WIN) {
       const base = appName.toLowerCase().replace(/\.exe$/, '').trim()
@@ -769,7 +859,8 @@ async function open_whatsapp_chat(args: Record<string, unknown>): Promise<ToolRe
 
 /**
  * Search the filesystem and return matching file paths.
- * macOS:   Spotlight mdfind (no shell — query passed as argv element)
+ * macOS:   Spotlight mdfind, scoped to $HOME, filename match only (no shell —
+ *          query passed as argv elements)
  * Windows: PowerShell Get-ChildItem (home dir, depth 5, filter *query*)
  * Linux:   find (home dir, maxdepth 6, case-insensitive name match)
  */
@@ -782,7 +873,13 @@ async function search_files(args: Record<string, unknown>): Promise<ToolResult> 
     if (IS_MAC) {
       // execFile passes `query` as a single argv element to mdfind — no shell
       // is spawned, so shell metacharacters in the query are inert.
-      const { stdout } = await execFileAsync('mdfind', [query], { maxBuffer: 1024 * 1024 })
+      // Scoped to $HOME (parity with the Windows/Linux branches below) and
+    // matched against the filename only (-name), not Spotlight's default
+    // full-content+metadata search — narrower scope AND narrower semantics,
+    // both intentional.
+    const { stdout } = await execFileAsync('mdfind', ['-onlyin', homedir(), '-name', query], {
+      maxBuffer: 1024 * 1024
+    })
       rawOutput = stdout
     } else if (IS_WIN) {
       // The query is passed out-of-band via the environment and referenced as a
@@ -935,15 +1032,17 @@ try {
   $lines = @()
   foreach ($item in $f) { $lines += "$($item.Subject) @ $($item.Start)" }
   if ($lines.Count -eq 0) { 'No events scheduled today.' } else { $lines -join [char]10 }
-} catch { 'Calendar not available (Microsoft Outlook required): ' + $_.Exception.Message }
+} catch { Write-Error ('Calendar not available (Microsoft Outlook required): ' + $_.Exception.Message); exit 1 }
 `
       try {
         const output = await runPowerShellScript(script)
         return { ok: true, output: output || 'No events scheduled today.' }
       } catch (err) {
+        const stderr = (err as { stderr?: string }).stderr?.trim()
+        const detail = stderr || (err instanceof Error ? err.message : String(err))
         return {
           ok: false,
-          error: `Tool execution failed: ${err instanceof Error ? err.message : String(err)}`
+          error: `control_calendar "list" failed: ${detail}`
         }
       }
     }
@@ -974,7 +1073,7 @@ try {
   if ($env:OPENUI_CAL_END) { $appt.End = [DateTime]::Parse($env:OPENUI_CAL_END) } else { $appt.End = $appt.Start.AddHours(1) }
   $appt.Save()
   'Created calendar event: ' + $appt.Subject
-} catch { 'Calendar not available (Microsoft Outlook required): ' + $_.Exception.Message }
+} catch { Write-Error ('Calendar not available (Microsoft Outlook required): ' + $_.Exception.Message); exit 1 }
 `
       try {
         const output = await runPowerShellScript(script, {
@@ -985,9 +1084,11 @@ try {
         })
         return { ok: true, output: output || `Created event "${title}".` }
       } catch (err) {
+        const stderr = (err as { stderr?: string }).stderr?.trim()
+        const detail = stderr || (err instanceof Error ? err.message : String(err))
         return {
           ok: false,
-          error: `Tool execution failed: ${err instanceof Error ? err.message : String(err)}`
+          error: `control_calendar "create" failed: ${detail}`
         }
       }
     }
@@ -1112,6 +1213,19 @@ async function read_screen(
   const tier = context?.tier ?? 'free'
 
   // ── 1. Capture the primary display ────────────────────────────────────────
+  // Checked proactively (not just on an empty sources[] result) because on
+  // modern macOS a denied Screen Recording permission often still returns a
+  // source object — just with a blank thumbnail — so the empty-array check
+  // below cannot be relied on alone to catch the denied case.
+  if (IS_MAC && checkScreenRecording() !== 'granted') {
+    return {
+      ok: false,
+      error:
+        'Tool execution failed: Missing OS permissions — Screen Recording access is required. ' +
+        'Please grant access in System Settings → Privacy & Security → Screen Recording.',
+      permissionDenied: 'screenRecording'
+    }
+  }
   let pngBuffer: Buffer
   try {
     const sources = await desktopCapturer.getSources({
@@ -1125,7 +1239,8 @@ async function read_screen(
           'No screen sources found. ' +
           (IS_MAC
             ? 'Ensure Screen Recording permission is granted in System Settings → Privacy & Security → Screen Recording.'
-            : 'Ensure the app has permission to capture the screen.')
+            : 'Ensure the app has permission to capture the screen.'),
+        ...(IS_MAC ? { permissionDenied: 'screenRecording' as const } : {})
       }
     }
     pngBuffer = sources[0].thumbnail.toPNG()
@@ -1574,7 +1689,7 @@ export const toolSchemas: ToolSchema[] = [
   {
     name: 'list_apps',
     description:
-      'List the applications installed on this computer (Windows). Use this to ' +
+      'List the applications installed on this computer (Windows and macOS). Use this to ' +
       'discover the exact name of an app before calling open_app when the user is ' +
       'vague, or to answer "what apps can you open?". Optionally pass a "filter" ' +
       'substring to narrow the list (e.g. filter "studio" to find "Visual Studio Code").',

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 type Tier = 'free' | 'pro' | 'enterprise'
-type PermissionTarget = 'accessibility' | 'microphone'
+type PermissionTarget = 'accessibility' | 'microphone' | 'screenRecording'
 type ConsentStatus = 'unknown' | 'granted' | 'denied'
 type TaskSource = 'todo' | 'github'
 type InterviewState = 'idle' | 'asking' | 'listening' | 'evaluating' | 'complete'
@@ -242,7 +242,8 @@ const api = {
   },
 
   // Ask the main process to open the OS settings pane for the given permission
-  // (accessibility | microphone): macOS System Settings or Windows ms-settings:.
+  // (accessibility | microphone | screenRecording): macOS System Settings or
+  // Windows ms-settings: (screenRecording has no Windows pane).
   openSettings: (permission: PermissionTarget): void => {
     ipcRenderer.send('openui:permission:open-settings', permission)
   },

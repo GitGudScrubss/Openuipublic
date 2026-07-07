@@ -55,7 +55,7 @@ function TitleBar(): JSX.Element {
       </div>
       <div
         className="ou-titlebar-drag"
-        onDoubleClick={() => window.openui.toggleMaximizeWindow()}
+        onDoubleClick={isMac ? undefined : () => window.openui.toggleMaximizeWindow()}
       />
       {!isMac && (
         <div className="ou-winctl">

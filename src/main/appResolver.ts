@@ -22,7 +22,7 @@ export interface InstalledApp {
   /** Full path to an .exe/.lnk — launch via Start-Process when present. */
   path?: string
   /** Where the entry came from; used to break score ties (startapps is most reliable). */
-  source: 'startapps' | 'shortcut'
+  source: 'startapps' | 'shortcut' | 'app-bundle'
 }
 
 /**

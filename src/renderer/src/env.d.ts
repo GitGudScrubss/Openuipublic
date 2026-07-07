@@ -3,7 +3,7 @@
 import type { AppKind } from './lib/appKind'
 
 /** Which OS permission needs to be granted before the tool can proceed. */
-export type PermissionTarget = 'accessibility' | 'microphone'
+export type PermissionTarget = 'accessibility' | 'microphone' | 'screenRecording'
 
 /** Privacy consent state for anonymous usage analytics. */
 export type ConsentStatus = 'unknown' | 'granted' | 'denied'
