@@ -72,4 +72,16 @@ describe('resolveApp', () => {
     ]
     expect(resolveApp('slack', dup)?.source).toBe('startapps')
   })
+
+  it('resolves macOS .app-bundle entries the same way as Windows entries', () => {
+    const macApps: InstalledApp[] = [
+      { name: 'Visual Studio Code', path: '/Applications/Visual Studio Code.app', source: 'app-bundle' },
+      { name: 'Google Chrome', path: '/Applications/Google Chrome.app', source: 'app-bundle' },
+      { name: 'Notes', path: '/System/Applications/Notes.app', source: 'app-bundle' }
+    ]
+    expect(resolveApp('vscode', macApps)?.name).toBe('Visual Studio Code')
+    expect(resolveApp('chrome', macApps)?.name).toBe('Google Chrome')
+    expect(resolveApp('notes', macApps)?.path).toBe('/System/Applications/Notes.app')
+    expect(resolveApp('xyzzy', macApps)).toBeNull()
+  })
 })

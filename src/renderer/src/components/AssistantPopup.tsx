@@ -106,7 +106,7 @@ export default function AssistantPopup({
 
   // Suppress update banners during onboarding (flag set by the onboarding wizard).
   const onboardingComplete = localStorage.getItem('openui:onboarding-complete') !== 'false'
-  const isMac = navigator.platform.toLowerCase().includes('mac')
+  const isMac = window.openui.platform === 'darwin'
 
   // Imperative refs — caption and bars are managed outside React state so
   // GSAP and rAF writes don't conflict with React's reconciler.
